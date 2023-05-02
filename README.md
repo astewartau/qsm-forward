@@ -6,7 +6,9 @@ Includes code for:
 
  - Field model (forward multiplication with dipole kernel based on chi)
  - Signal model (magnitude and phase simulation based on field/M0/R1/R2star)
- - Shim field simulation
+ - Phase offset model
+ - Noise model
+ - Shim field model
  - k-space cropping
 
 See `main.py` for a full example.
