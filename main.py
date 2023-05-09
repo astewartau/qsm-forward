@@ -4,7 +4,6 @@ import os
 import nibabel as nib
 import numpy as np
 
-import visualisation
 import qsm_forward_3d
 
 class TissueParams:
