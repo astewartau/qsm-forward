@@ -4,7 +4,7 @@ import os
 import nibabel as nib
 import numpy as np
 
-import qsm_forward_3d
+import qsm_forward
 
 class TissueParams:
     chi_path = "head-phantom-maps/ChiModelMIX_noCalc.nii.gz"
