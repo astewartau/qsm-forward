@@ -4,7 +4,7 @@ import os
 import nibabel as nib
 import numpy as np
 
-import qsm_forward
+from qsm_forward_model import qsm_forward
 
 class TissueParams:
     chi_path = "head-phantom-maps/ChiModelMIX_noCalc.nii.gz"
@@ -12,6 +12,7 @@ class TissueParams:
     R1_path = "head-phantom-maps/R1.nii.gz"
     R2star_path = "head-phantom-maps/R2star.nii.gz"
     mask_path = "head-phantom-maps/BrainMask.nii.gz"
+    seg_path = "head-phantom-maps/SegmentedModel.nii.gz"
 
 class ReconParams:
     TR = 50e-3
