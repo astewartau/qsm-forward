@@ -6,40 +6,30 @@ import numpy as np
 
 from qsm_forward_model import qsm_forward
 
-class TissueParams:
-    chi_path = "head-phantom-maps/ChiModelMIX_noCalc.nii.gz"
-    M0_path = "head-phantom-maps/M0.nii.gz"
-    R1_path = "head-phantom-maps/R1.nii.gz"
-    R2star_path = "head-phantom-maps/R2star.nii.gz"
-    mask_path = "head-phantom-maps/BrainMask.nii.gz"
-    seg_path = "head-phantom-maps/SegmentedModel.nii.gz"
+tissue_params = {
+    "chi_path" : "head-phantom-maps/ChiModelMIX_noCalc.nii.gz",
+    "M0_path" : "head-phantom-maps/M0.nii.gz",
+    "R1_path" : "head-phantom-maps/R1.nii.gz",
+    "R2star_path" : "head-phantom-maps/R2star.nii.gz",
+    "mask_path" : "head-phantom-maps/BrainMask.nii.gz",
+    "seg_path" : "head-phantom-maps/SegmentedModel.nii.gz"
+}
 
-class ReconParams:
-    TR = 50e-3
-    TEs = np.array([ 4e-3, 12e-3, 20e-3, 28e-3 ])
-    flip_angle = 15
-    B0 = 7
-    B0_dir = np.array([0, 0, 1])
-    phase_offset = 0
-    shimm = False
-    voxel_size = np.array([1.0, 1.0, 1.0])
-    peak_snr = np.inf
-    out_dir = os.path.join(os.getcwd(), "outputs")
-
-
-def default_recon_params():
-    return ReconParams()
-
-def default_tissue_params():
-    return TissueParams()
+recon_params = {
+    "TR" : 50e-3,
+    "TEs" : np.array([ 4e-3, 12e-3, 20e-3, 28e-3 ]),
+    "flip_angle" : 15,
+    "B0" : 7,
+    "B0_dir" : np.array([0, 0, 1]),
+    "phase_offset" : 0,
+    "shimm" : False,
+    "voxel_size" : np.array([1.0, 1.0, 1.0]),
+    "peak_snr" : np.inf,
+    "out_dir" : os.path.join(os.getcwd(), "outputs")
+}
 
 
 if __name__ == "__main__":
-    # get parameters
-    print("Loading parameters...")
-    recon_params = default_recon_params()
-    tissue_params = default_tissue_params()
-
     # create output directories
     print("Creating output directory...")
     os.makedirs(recon_params.out_dir, exist_ok=True)

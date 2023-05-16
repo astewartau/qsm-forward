@@ -12,7 +12,10 @@ def get_slice(volume, dim=0, slice_idx=None):
     return volume[idx_tuple], slice_idx
 
 def show_histogram(data, mask=None, title=None, dim=0, n_bins=100, n_ticks=10, n_rotations=0, vrange_hist=None, vrange_ylim=None, vrange_imshow=None, show_range=True, show_mean=True, show_stds=True, cmap='gray', units=None, precision=3, **args):
-    # fix data
+    # if str
+    if isinstance(data, str): data = torch.tensor(nib.load(data).get_fdata())
+    
+    # if not tensor
     if not isinstance(data, torch.Tensor): data = torch.tensor(data)
 
     # get slice
