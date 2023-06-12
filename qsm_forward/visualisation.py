@@ -179,7 +179,6 @@ def show_image(
     plt.show()
     plt.close()
 
-
 def view_slices_3d(image_3d, slice_nbr, vmin, vmax, title=""):
     fig = plt.figure(figsize=(12, 6))
     plt.suptitle(title, fontsize=10)
@@ -201,3 +200,4 @@ def view_slices_3d(image_3d, slice_nbr, vmin, vmax, title=""):
     plt.axis('off')
     plt.title("Sagittal")
     cbar = plt.colorbar(shrink=0.5)
+

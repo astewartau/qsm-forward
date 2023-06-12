@@ -4,7 +4,7 @@ import os
 import nibabel as nib
 import numpy as np
 
-from qsm_forward_model import qsm_forward
+from qsm_forward import qsm_forward
 
 tissue_params = {
     "chi_path" : "head-phantom-maps/ChiModelMIX_noCalc.nii.gz",
@@ -38,23 +38,23 @@ if __name__ == "__main__":
     print("Computing field model...")
     chi_nii = nib.load(tissue_params.chi_path)
     chi = chi_nii.get_fdata()
-    field = qsm_forward_3d.forward_convolution_v2(chi)
+    field = qsm_forward.forward_convolution_v2(chi)
     del chi
 
     # simulate shim field
     print("Computing shim fields...")
     brain_mask = nib.load(tissue_params.mask_path).get_fdata()
-    _, field, _ = qsm_forward_3d.poly_fit_shim_like(field, brain_mask, order=2)
+    _, field, _ = qsm_forward.poly_fit_shim_like(field, brain_mask, order=2)
 
     # phase offset
     print("Computing phase offset...")
     M0 = nib.load(tissue_params.M0_path).get_fdata()
-    phase_offset = qsm_forward_3d.compute_phase_offset1(M0, brain_mask, M0.shape)
+    phase_offset = qsm_forward.compute_phase_offset(M0, brain_mask, M0.shape)
     del brain_mask
 
     # signal model
     print("Computing MR signal...")
-    sigHR = qsm_forward_3d.signal_model(
+    sigHR = qsm_forward.signal_model(
         field=field,
         B0=recon_params.B0,
         TR=recon_params.TR,
@@ -70,20 +70,20 @@ if __name__ == "__main__":
 
     # image-space cropping of chi
     print("Image-space cropping of chi...")
-    chi_cropped_nii = qsm_forward_3d.resize(chi_nii, recon_params.voxel_size)
+    chi_cropped_nii = qsm_forward.resize(chi_nii, recon_params.voxel_size)
     nib.save(chi_cropped_nii, filename=os.path.join(recon_params.out_dir, "cropped_qsm.nii"))
     
     # k-space cropping of sigHR
     print("k-space cropping of MR signal")
     resolution = np.array(np.round((np.array(chi_nii.header.get_zooms()) / recon_params.voxel_size) * np.array(chi_nii.header.get_data_shape())), dtype=int)
-    sigHR_cropped = qsm_forward_3d.kspace_crop(sigHR, resolution)
+    sigHR_cropped = qsm_forward.kspace_crop(sigHR, resolution)
     del sigHR
     nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_mag.nii"))
     nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_phs.nii"))
 
     # noise
     print("Simulating noise...")
-    sigHR_cropped_noisy = qsm_forward_3d.add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr)
+    sigHR_cropped_noisy = qsm_forward.add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr)
     del sigHR_cropped
     nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_mag_noisy.nii"))
     nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_phs_noisy.nii"))
