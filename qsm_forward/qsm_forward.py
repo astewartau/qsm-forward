@@ -206,7 +206,7 @@ def resize(nii, voxel_size):
     """
     
     target_shape = np.array(np.round((np.array(nii.header.get_zooms()) / voxel_size) * np.array(nii.header.get_data_shape())), dtype=int)
-    target_affine = np.diag(voxel_size + [1])
+    target_affine = np.diag(list(voxel_size) + [1])
     
     return resample_img(
         nii,

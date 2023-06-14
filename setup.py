@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name='qsm_forward',
-    version='0.2',
+    version='0.2-2',
     packages=find_packages(),
-    url='https://github.com/astewartau/qsm_forward_model',
+    url='https://github.com/astewartau/qsm-forward-model',
     author='Ashley Stewart',
     author_email='a.stewart.au@gmail.com',
-    description='A forward-model simulation for Quantitative Susceptibility Mapping.',
+    description='A forward-model simulation for Quantitative Susceptibility Mapping',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     install_requires=[
