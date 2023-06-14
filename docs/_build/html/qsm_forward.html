@@ -47,6 +47,7 @@
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.add_noise"><code class="docutils literal notranslate"><span class="pre">add_noise()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.crop_imagespace"><code class="docutils literal notranslate"><span class="pre">crop_imagespace()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.crop_kspace"><code class="docutils literal notranslate"><span class="pre">crop_kspace()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#qsm_forward.generate_bids"><code class="docutils literal notranslate"><span class="pre">generate_bids()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.generate_field"><code class="docutils literal notranslate"><span class="pre">generate_field()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.generate_phase_offset"><code class="docutils literal notranslate"><span class="pre">generate_phase_offset()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qsm_forward.generate_shimmed_field"><code class="docutils literal notranslate"><span class="pre">generate_shimmed_field()</span></code></a></li>
@@ -150,6 +151,28 @@
 </dd>
 </dl>
 </section>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="qsm_forward.generate_bids">
+<span class="sig-prename descclassname"><span class="pre">qsm_forward.</span></span><span class="sig-name descname"><span class="pre">generate_bids</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tissue_params</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">recon_params</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bids_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#qsm_forward.generate_bids" title="Permalink to this definition"></a></dt>
+<dd><p>Generate T2*-weighted MRI signals and save the outputs in the BIDS-compliant format.</p>
+<p>This function simulates a T2*-weighted MRI signal based on a ground truth susceptibility map,
+computes the necessary parameters, and saves the outputs (images, JSON headers) in the BIDS-compliant
+format in the specified directory.</p>
+<p>Parameters:
+tissue_params (dict): A dictionary containing paths to different tissue parameter files.</p>
+<blockquote>
+<div><p>Keys are: “chi_path”, “M0_path”, “R1_path”, “R2star_path”, “mask_path”, and “seg_path”.</p>
+</div></blockquote>
+<dl class="simple">
+<dt>recon_params (dict): A dictionary containing the parameters for the reconstruction simulation.</dt><dd><p>Keys are: “Subject”, “Session”, “Run”, “TR”, “TEs”, “flip_angle”, “B0”, “B0_dir”,
+“phase_offset”, “shimm”, “voxel_size”, “peak_snr”.</p>
+</dd>
+</dl>
+<p>bids_dir (str): The directory where the BIDS-formatted outputs will be saved.</p>
+<p>Returns:
+None. Outputs are saved as files in the bids_dir directory.</p>
 </dd></dl>
 
 <dl class="py function">
@@ -271,7 +294,7 @@ include that point in the fit.</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="qsm_forward.resize">
-<span class="sig-prename descclassname"><span class="pre">qsm_forward.</span></span><span class="sig-name descname"><span class="pre">resize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">nii</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">voxel_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#qsm_forward.resize" title="Permalink to this definition"></a></dt>
+<span class="sig-prename descclassname"><span class="pre">qsm_forward.</span></span><span class="sig-name descname"><span class="pre">resize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">nii</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">voxel_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">interpolation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'continuous'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#qsm_forward.resize" title="Permalink to this definition"></a></dt>
 <dd><p>Resize a Nifti image to a voxel size.</p>
 <section id="id13">
 <h2>Parameters<a class="headerlink" href="#id13" title="Permalink to this heading"></a></h2>
@@ -279,6 +302,8 @@ include that point in the fit.</p>
 <dt>nii<span class="classifier">nibabel.nifti1.Nifti1Image</span></dt><dd><p>The input Nifti image.</p>
 </dd>
 <dt>voxel_size<span class="classifier">list of float</span></dt><dd><p>The desired voxel size after resizing.</p>
+</dd>
+<dt>interpolation<span class="classifier">str</span></dt><dd><p>Can be ‘continuous’, ‘linear’, or ‘nearest’. Indicates the resample method. Default=’continuous’.</p>
 </dd>
 </dl>
 </section>
