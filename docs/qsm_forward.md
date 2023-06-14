@@ -110,7 +110,7 @@ numpy.ndarray
     The resulting magnetic field array after the forward convolution operation.
 
 
-### qsm_forward.generate_phase_offset(M0, brain_mask, dims)
+### qsm_forward.generate_phase_offset(M0, mask, dims)
 Generate a suitable phase offset.
 
 ## Parameters
@@ -119,9 +119,9 @@ M0
 
     The initial magnetization.
 
-brain_mask
+mask
 
-    A binary mask that indicates the region of the brain.
+    A binary mask that indicates the internal region of interest.
 
 dims
 
@@ -134,7 +134,7 @@ numpy.ndarray
     The phase offset of the input image.
 
 
-### qsm_forward.generate_shimmed_field(field, brain_mask, order=2)
+### qsm_forward.generate_shimmed_field(field, mask, order=2)
 Simulate field shimming by fitting the field with second- and third-order Legendre polynomials.
 
 ## Parameters
@@ -143,7 +143,7 @@ field
 
     3D array representing the magnetic field to fit.
 
-brain_mask
+mask
 
     3D binary array. Must be the same shape as field. A True value at a coordinate will 
     include that point in the fit.
@@ -170,7 +170,7 @@ b
 
 ValueError
 
-    If field and brain_mask shapes are not the same.
+    If field and mask shapes are not the same.
 
 
 ### qsm_forward.generate_signal(field, B0=3, TR=1, TE=0.03, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1)
