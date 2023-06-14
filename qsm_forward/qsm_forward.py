@@ -76,14 +76,14 @@ def generate_bids(tissue_params, recon_params, bids_dir):
     chi_nii = nib.load(tissue_params['chi_path'])
     print("Image-space resizing of chi...")
     chi_downsampled_nii = qsm_forward.resize(chi_nii, recon_params['voxel_size'])
-    nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", "chi.nii"))
-    print("Image-space cropping of brain mask...")
+    nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
+    print("Image-space cropping of mask...")
     mask_downsampled_nii = qsm_forward.resize(nib.load(tissue_params['mask_path']), recon_params['voxel_size'], 'nearest')
-    nib.save(mask_downsampled_nii, filename=os.path.join(session_dir, "extra_data", "brain-mask.nii"))
+    nib.save(mask_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
     del mask_downsampled_nii
     print("Image-space cropping of segmentation...")
     seg_downsampled_nii = qsm_forward.resize(nib.load(tissue_params['seg_path']), recon_params['voxel_size'], 'nearest')
-    nib.save(seg_downsampled_nii, filename=os.path.join(session_dir, "extra_data", "segmentation.nii"))
+    nib.save(seg_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
     del seg_downsampled_nii
 
     # calculate field
@@ -94,14 +94,14 @@ def generate_bids(tissue_params, recon_params, bids_dir):
 
     # simulate shim field
     print("Computing shim fields...")
-    brain_mask = nib.load(tissue_params['mask_path']).get_fdata()
-    _, field, _ = qsm_forward.generate_shimmed_field(field, brain_mask, order=2)
+    mask = nib.load(tissue_params['mask_path']).get_fdata()
+    _, field, _ = qsm_forward.generate_shimmed_field(field, mask, order=2)
 
     # phase offset
     print("Computing phase offset...")
     M0 = nib.load(tissue_params['M0_path']).get_fdata()
-    phase_offset = qsm_forward.generate_phase_offset(M0, brain_mask, M0.shape)
-    del brain_mask
+    phase_offset = qsm_forward.generate_phase_offset(M0, mask, M0.shape)
+    del mask
 
     # signal model
     multiecho = len(recon_params['TEs']) > 1
@@ -181,7 +181,7 @@ def generate_field(chi):
 
     return field
 
-def generate_phase_offset(M0, brain_mask, dims):
+def generate_phase_offset(M0, mask, dims):
     """
     Generate a suitable phase offset.
 
@@ -189,8 +189,8 @@ def generate_phase_offset(M0, brain_mask, dims):
     ----------
     M0 : numpy.ndarray
         The initial magnetization.
-    brain_mask : numpy.ndarray
-        A binary mask that indicates the region of the brain.
+    mask : numpy.ndarray
+        A binary mask that indicates the internal region of interest.
     dims : tuple of int
         The dimensions of the input image.
 
@@ -211,15 +211,15 @@ def generate_phase_offset(M0, brain_mask, dims):
     
     temp = (x/w[1])**2 + (y/w[0])**2 + (z/w[2])**2
     
-    max_temp = np.max(temp[brain_mask != 0])
-    min_temp = np.min(temp[brain_mask != 0])
+    max_temp = np.max(temp[mask != 0])
+    min_temp = np.min(temp[mask != 0])
     
     phase_offset = -temp / (max_temp - min_temp) * np.pi
 
     return phase_offset
 
 
-def generate_shimmed_field(field, brain_mask, order=2):
+def generate_shimmed_field(field, mask, order=2):
     """
     Simulate field shimming by fitting the field with second- and third-order Legendre polynomials.
 
@@ -227,7 +227,7 @@ def generate_shimmed_field(field, brain_mask, order=2):
     ----------
     field : numpy.ndarray
         3D array representing the magnetic field to fit.
-    brain_mask : numpy.ndarray
+    mask : numpy.ndarray
         3D binary array. Must be the same shape as `field`. A True value at a coordinate will 
         include that point in the fit.
     order : int, optional
@@ -245,14 +245,14 @@ def generate_shimmed_field(field, brain_mask, order=2):
     Raises
     ------
     ValueError
-        If `field` and `brain_mask` shapes are not the same.
+        If `field` and `mask` shapes are not the same.
     """
 
     dim = field.shape
     
     ## for volume fitting
-    #brain_mask = np.ones(brain_mask.shape)
-    indices = np.nonzero(brain_mask)
+    #mask = np.ones(mask.shape)
+    indices = np.nonzero(mask)
     x1, y1, z1 = indices
     R = field[indices]
     b = None
@@ -274,7 +274,7 @@ def generate_shimmed_field(field, brain_mask, order=2):
         Residuals = (field-FIT3D)
     else:
         FIT3D = np.zeros_like(field)
-        Residuals = (field-FIT3D) * brain_mask
+        Residuals = (field-FIT3D) * mask
     
     return FIT3D, Residuals, b
 
