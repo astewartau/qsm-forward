@@ -271,7 +271,7 @@ def crop_kspace(volume, dims, scaling=False, gibbs_correction=True):
 
     """
 
-    working_volume = np.fft.ifftn(np.fft.ifftshift(crop(np.fft.fftshift(np.fft.fftn(volume)), dims)))
+    working_volume = np.fft.ifftn(np.fft.ifftshift(crop_imagespace(np.fft.fftshift(np.fft.fftn(volume)), dims)))
     
     # gibbs correction is only needed for non-complex volumes
     if not np.iscomplexobj(volume):
