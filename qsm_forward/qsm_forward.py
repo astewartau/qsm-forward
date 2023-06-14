@@ -11,7 +11,6 @@ import json
 import os
 import nibabel as nib
 import numpy as np
-import qsm_forward
 
 # Default parameters for tissue
 default_tissue_params = {
@@ -34,7 +33,8 @@ default_recon_params = {
     "B0" : 7,                       # Magnetic field strength (in Tesla)
     "B0_dir" : np.array([0, 0, 1]), # B0 field direction
     "phase_offset" : 0,             # Phase offset (in radians)
-    "shimm" : False,                # Boolean to control shimming
+    "generate_phase_offset": True,  # Boolean to control phase offset generation
+    "generate_shim_field" : True,   # Boolean to control shim field generation
     "voxel_size" : np.array([1.0, 1.0, 1.0]), # Voxel size (in mm)
     "peak_snr" : np.inf             # Peak signal-to-noise ratio
 }
@@ -75,60 +75,67 @@ def generate_bids(tissue_params, recon_params, bids_dir):
     # image-space resizing
     chi_nii = nib.load(tissue_params['chi_path'])
     print("Image-space resizing of chi...")
-    chi_downsampled_nii = qsm_forward.resize(chi_nii, recon_params['voxel_size'])
+    chi_downsampled_nii = resize(chi_nii, recon_params['voxel_size'])
     nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
-    print("Image-space cropping of mask...")
-    mask_downsampled_nii = qsm_forward.resize(nib.load(tissue_params['mask_path']), recon_params['voxel_size'], 'nearest')
-    nib.save(mask_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
-    del mask_downsampled_nii
-    print("Image-space cropping of segmentation...")
-    seg_downsampled_nii = qsm_forward.resize(nib.load(tissue_params['seg_path']), recon_params['voxel_size'], 'nearest')
-    nib.save(seg_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
-    del seg_downsampled_nii
+    if os.path.exists(str(tissue_params['mask_path'])):
+        print("Image-space cropping of mask...")
+        mask_downsampled_nii = resize(nib.load(tissue_params['mask_path']), recon_params['voxel_size'], 'nearest')
+        nib.save(mask_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
+        del mask_downsampled_nii
+    if os.path.exists(str(tissue_params['seg_path'])):
+        print("Image-space cropping of segmentation...")
+        seg_downsampled_nii = resize(nib.load(tissue_params['seg_path']), recon_params['voxel_size'], 'nearest')
+        nib.save(seg_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
+        del seg_downsampled_nii
 
     # calculate field
     print("Computing field model...")
     chi = chi_nii.get_fdata()
-    field = qsm_forward.generate_field(chi)
+    field = generate_field(chi)
     del chi
 
     # simulate shim field
-    print("Computing shim fields...")
-    mask = nib.load(tissue_params['mask_path']).get_fdata()
-    _, field, _ = qsm_forward.generate_shimmed_field(field, mask, order=2)
+    mask = nib.load(tissue_params['mask_path']).get_fdata() if os.path.exists(tissue_params['mask_path']) else np.ones(field.shape)
+    if recon_params['generate_shim_field']:
+        print("Computing shim fields...")
+        _, field, _ = generate_shimmed_field(field, mask, order=2)
 
     # phase offset
-    print("Computing phase offset...")
-    M0 = nib.load(tissue_params['M0_path']).get_fdata()
-    phase_offset = qsm_forward.generate_phase_offset(M0, mask, M0.shape)
-    del mask
+    M0 = nib.load(tissue_params['M0_path']).get_fdata() if os.path.exists(tissue_params['M0_path']) else np.ones(field.shape) * mask
+    if recon_params['generate_phase_offset']:
+        print("Computing phase offset...")
+        phase_offset = recon_params['phase_offset'] + generate_phase_offset(M0, mask, M0.shape)
 
     # signal model
     multiecho = len(recon_params['TEs']) > 1
+    R1 = nib.load(tissue_params['R1_path']).get_fdata() if os.path.exists(tissue_params['R1_path']) else np.ones(field.shape) * mask
+    R2star = nib.load(tissue_params['R2star_path']).get_fdata() if os.path.exists(tissue_params['R2star_path']) else np.ones(field.shape) * mask
+    del mask
     for i in range(len(recon_params['TEs'])):
         print(f"Computing MR signal for echo {i+1}...")
         recon_name_i = f"{recon_name}_echo-{i+1}" if multiecho else recon_name
-        sigHR = qsm_forward.generate_signal(
+
+        sigHR = generate_signal(
             field=field,
             B0=recon_params['B0'],
             TR=recon_params['TR'],
             TE=recon_params['TEs'][i],
             flip_angle=recon_params['flip_angle'],
             phase_offset=phase_offset,
-            R1=nib.load(tissue_params['R1_path']).get_fdata(),
-            R2star=nib.load(tissue_params['R2star_path']).get_fdata(),
-            M0=nib.load(tissue_params['M0_path']).get_fdata()
+            R1=R1,
+            R2star=R2star,
+            M0=M0
         )
     
         # k-space cropping of sigHR
         print(f"k-space cropping of MR signal for echo {i+1}...")
         resolution = np.array(np.round((np.array(chi_nii.header.get_zooms()) / recon_params['voxel_size']) * np.array(chi_nii.header.get_data_shape())), dtype=int)
-        sigHR_cropped = qsm_forward.crop_kspace(sigHR, resolution)
+        sigHR_cropped = crop_kspace(sigHR, resolution)
         del sigHR
 
         # noise
         print(f"Simulating noise for echo {i+1}...")
-        sigHR_cropped_noisy = qsm_forward.add_noise(sigHR_cropped, peak_snr=recon_params['peak_snr'])
+        sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params['peak_snr'])
         del sigHR_cropped
 
         # save nifti images
