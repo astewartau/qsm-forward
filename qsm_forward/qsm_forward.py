@@ -187,7 +187,7 @@ def add_noise(sig, peak_snr=np.inf):
     return sig_noisy
 
 
-def resize(nii, voxel_size):
+def resize(nii, voxel_size, interpolation='continuous'):
     """
     Resize a Nifti image to a voxel size.
 
@@ -197,6 +197,8 @@ def resize(nii, voxel_size):
         The input Nifti image.
     voxel_size : list of float
         The desired voxel size after resizing.
+    interpolation : str
+        Can be 'continuous', 'linear', or 'nearest'. Indicates the resample method. Default='continuous'.
 
     Returns
     -------
@@ -212,7 +214,7 @@ def resize(nii, voxel_size):
         nii,
         target_affine=target_affine,
         target_shape=target_shape,
-        interpolation='nearest'
+        interpolation=interpolation
     )
 
 
