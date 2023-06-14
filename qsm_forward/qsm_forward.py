@@ -2,7 +2,7 @@ import numpy as np
 from dipy.denoise.gibbs import gibbs_removal
 from nilearn.image import resample_img
 
-def forward_convolution(chi):
+def generate_field(chi):
     """
     Perform the forward convolution operation.
 
@@ -29,7 +29,104 @@ def forward_convolution(chi):
 
     return field
 
-def signal_model(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1):
+def generate_phase_offset(M0, brain_mask, dims):
+    """
+    Generate a suitable phase offset.
+
+    Parameters
+    ----------
+    M0 : numpy.ndarray
+        The initial magnetization.
+    brain_mask : numpy.ndarray
+        A binary mask that indicates the region of the brain.
+    dims : tuple of int
+        The dimensions of the input image.
+
+    Returns
+    -------
+    numpy.ndarray
+        The phase offset of the input image.
+
+    """
+
+    c, w = _center_of_mass(M0)
+    
+    x, y, z = np.meshgrid(
+        np.arange(1, dims[1]+1)-c[1],
+        np.arange(1, dims[0]+1)-c[0],
+        np.arange(1, dims[2]+1)-c[2]
+    )
+    
+    temp = (x/w[1])**2 + (y/w[0])**2 + (z/w[2])**2
+    
+    max_temp = np.max(temp[brain_mask != 0])
+    min_temp = np.min(temp[brain_mask != 0])
+    
+    phase_offset = -temp / (max_temp - min_temp) * np.pi
+
+    return phase_offset
+
+
+def generate_shimmed_field(field, brain_mask, order=2):
+    """
+    Simulate field shimming by fitting the field with second- and third-order Legendre polynomials.
+
+    Parameters
+    ----------
+    field : numpy.ndarray
+        3D array representing the magnetic field to fit.
+    brain_mask : numpy.ndarray
+        3D binary array. Must be the same shape as `field`. A True value at a coordinate will 
+        include that point in the fit.
+    order : int, optional
+        The order of the polynomial to fit. Must be 0, 1, or 2. Default is 2.
+
+    Returns
+    -------
+    FIT3D : numpy.ndarray
+        3D array representing the fitted field.
+    Residuals : numpy.ndarray
+        3D array representing the residuals of the fit.
+    b : numpy.ndarray
+        1D array representing the coefficients of the fitted polynomial.
+
+    Raises
+    ------
+    ValueError
+        If `field` and `brain_mask` shapes are not the same.
+    """
+
+    dim = field.shape
+    
+    ## for volume fitting
+    #brain_mask = np.ones(brain_mask.shape)
+    indices = np.nonzero(brain_mask)
+    x1, y1, z1 = indices
+    R = field[indices]
+    b = None
+    
+    if len(indices[0]) > (3*order)**2:
+        model = _create_model(x1, y1, z1, dim, order)
+        b = np.linalg.pinv(model) @ R
+        temp = R - model @ b
+        del model, R
+        
+        indices = np.meshgrid(*[range(d) for d in dim], indexing='ij')
+        x1, y1, z1 = [ind.flatten() for ind in indices]
+        model = _create_model(x1, y1, z1, dim, order)
+        
+        Fit = model @ b
+        del model
+        
+        FIT3D = Fit.reshape(dim)
+        Residuals = (field-FIT3D)
+    else:
+        FIT3D = np.zeros_like(field)
+        Residuals = (field-FIT3D) * brain_mask
+    
+    return FIT3D, Residuals, b
+
+def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -90,106 +187,9 @@ def add_noise(sig, peak_snr=np.inf):
     return sig_noisy
 
 
-def poly_fit_shim_like(volume, brain_mask, order=2):
-    """
-    Perform a polynomial fit of the given order to a volume using a binary brain mask to select points.
-
-    Parameters
-    ----------
-    volume : numpy.ndarray
-        3D array representing the volume to fit.
-    brain_mask : numpy.ndarray
-        3D binary array. Must be the same shape as `volume`. A True value at a coordinate will 
-        include that point in the fit.
-    order : int, optional
-        The order of the polynomial to fit. Must be 0, 1, or 2. Default is 2.
-
-    Returns
-    -------
-    FIT3D : numpy.ndarray
-        3D array representing the fitted volume.
-    Residuals : numpy.ndarray
-        3D array representing the residuals of the fit.
-    b : numpy.ndarray
-        1D array representing the coefficients of the fitted polynomial.
-
-    Raises
-    ------
-    ValueError
-        If `volume` and `brain_mask` shapes are not the same.
-    """
-
-    dim = volume.shape
-    
-    ## for volume fitting
-    #brain_mask = np.ones(brain_mask.shape)
-    indices = np.nonzero(brain_mask)
-    x1, y1, z1 = indices
-    R = volume[indices]
-    b = None
-    
-    if len(indices[0]) > (3*order)**2:
-        model = _create_model(x1, y1, z1, dim, order)
-        b = np.linalg.pinv(model) @ R
-        temp = R - model @ b
-        del model, R
-        
-        indices = np.meshgrid(*[range(d) for d in dim], indexing='ij')
-        x1, y1, z1 = [ind.flatten() for ind in indices]
-        model = _create_model(x1, y1, z1, dim, order)
-        
-        Fit = model @ b
-        del model
-        
-        FIT3D = Fit.reshape(dim)
-        Residuals = (volume-FIT3D)
-    else:
-        FIT3D = np.zeros_like(volume)
-        Residuals = (volume-FIT3D) * brain_mask
-    
-    return FIT3D, Residuals, b
-
-def compute_phase_offset(M0, brain_mask, dims):
-    """
-    Compute the phase offset of an image.
-
-    Parameters
-    ----------
-    M0 : numpy.ndarray
-        The input image.
-    brain_mask : numpy.ndarray
-        A binary mask that indicates the region of the brain.
-    dims : tuple of int
-        The dimensions of the input image.
-
-    Returns
-    -------
-    numpy.ndarray
-        The phase offset of the input image.
-
-    """
-
-    c, w = _center_of_mass(M0)
-    
-    x, y, z = np.meshgrid(
-        np.arange(1, dims[1]+1)-c[1],
-        np.arange(1, dims[0]+1)-c[0],
-        np.arange(1, dims[2]+1)-c[2]
-    )
-    
-    temp = (x/w[1])**2 + (y/w[0])**2 + (z/w[2])**2
-    
-    max_temp = np.max(temp[brain_mask != 0])
-    min_temp = np.min(temp[brain_mask != 0])
-    
-    phase_offset = -temp / (max_temp - min_temp) * np.pi
-
-    return phase_offset
-
-
 def resize(nii, voxel_size):
     """
-    Resize a Nifti image.
+    Resize a Nifti image to a voxel size.
 
     Parameters
     ----------
@@ -216,7 +216,7 @@ def resize(nii, voxel_size):
     )
 
 
-def crop(x, shape):
+def crop_imagespace(x, shape):
     """
     Crop a nD matrix around its center.
 
@@ -249,7 +249,7 @@ def crop(x, shape):
     res = x[tuple(idx)]
     return res
 
-def kspace_crop(volume, dims, scaling=False, gibbs_correction=True):
+def crop_kspace(volume, dims, scaling=False, gibbs_correction=True):
     """
     Crop a 3D volume in k-space and apply optional scaling and Gibbs ringing correction.
 

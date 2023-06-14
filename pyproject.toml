@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qsm_forward"
-version = "0.2-2"
+name = "qsm-forward"
+version = "0.2-3"
 authors = [
   { name="Ashley Stewart", email="a.stewart.au@gmail.com" },
 ]

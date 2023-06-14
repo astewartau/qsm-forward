@@ -38,23 +38,23 @@ if __name__ == "__main__":
     print("Computing field model...")
     chi_nii = nib.load(tissue_params['chi_path'])
     chi = chi_nii.get_fdata()
-    field = qsm_forward.forward_convolution(chi)
+    field = qsm_forward.generate_field(chi)
     del chi
 
     # simulate shim field
     print("Computing shim fields...")
     brain_mask = nib.load(tissue_params['mask_path']).get_fdata()
-    _, field, _ = qsm_forward.poly_fit_shim_like(field, brain_mask, order=2)
+    _, field, _ = qsm_forward.generate_shimmed_field(field, brain_mask, order=2)
 
     # phase offset
     print("Computing phase offset...")
     M0 = nib.load(tissue_params['M0_path']).get_fdata()
-    phase_offset = qsm_forward.compute_phase_offset(M0, brain_mask, M0.shape)
+    phase_offset = qsm_forward.generate_phase_offset(M0, brain_mask, M0.shape)
     del brain_mask
 
     # signal model
     print("Computing MR signal...")
-    sigHR = qsm_forward.signal_model(
+    sigHR = qsm_forward.generate_signal(
         field=field,
         B0=recon_params['B0'],
         TR=recon_params['TR'],
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     # k-space cropping of sigHR
     print("k-space cropping of MR signal")
     resolution = np.array(np.round((np.array(chi_nii.header.get_zooms()) / recon_params['voxel_size']) * np.array(chi_nii.header.get_data_shape())), dtype=int)
-    sigHR_cropped = qsm_forward.kspace_crop(sigHR, resolution)
+    sigHR_cropped = qsm_forward.crop_kspace(sigHR, resolution)
     del sigHR
     nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_mag.nii"))
     nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped), affine=chi_cropped_nii.affine, header=chi_cropped_nii.header), filename=os.path.join(recon_params.out_dir, "cropped_phs.nii"))

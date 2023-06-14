@@ -1,8 +1,8 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='qsm_forward',
-    version='0.2-2',
+    name='qsm-forward',
+    version='0.2-3',
     packages=find_packages(),
     url='https://github.com/astewartau/qsm-forward-model',
     author='Ashley Stewart',
@@ -12,13 +12,8 @@ setup(
     long_description_content_type='text/markdown',
     install_requires=[
         'numpy',
-        'matplotlib',
-        'nibabel',
         'nilearn',
-        'ipykernel',
-        'scikit-image',
-        'dipy',
-        'torch'
+        'dipy'
     ],
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -28,3 +23,4 @@ setup(
         'Programming Language :: Python :: 3.8',
     ],
 )
+
