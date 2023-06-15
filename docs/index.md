@@ -10,6 +10,12 @@ contain the root `toctree` directive. -->
 * [qsm_forward](qsm_forward.md)
 
 
+    * [`ReconParams`](qsm_forward.md#qsm_forward.ReconParams)
+
+
+    * [`TissueParams`](qsm_forward.md#qsm_forward.TissueParams)
+
+
     * [`add_noise()`](qsm_forward.md#qsm_forward.add_noise)
 
 

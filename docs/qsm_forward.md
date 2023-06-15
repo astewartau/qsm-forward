@@ -1,6 +1,94 @@
 # qsm_forward
 
 
+### _class_ qsm_forward.ReconParams(subject='1', session='1', run='1', TR=50000.0, TEs=array([0.004, 0.012, 0.02, 0.028]), flip_angle=15, B0=7, B0_dir=array([0, 0, 1]), phase_offset=0, generate_phase_offset=True, generate_shim_field=True, voxel_size=array([1., 1., 1.]), peak_snr=inf)
+A class used to represent reconstruction parameters.
+
+## Attributes
+
+subject
+
+    The ID of the subject.
+
+session
+
+    The ID of the session.
+
+run
+
+    The run number.
+
+TR
+
+    Repetition time (in seconds).
+
+TEs
+
+    Echo times (in seconds).
+
+flip_angle
+
+    Flip angle (in degrees).
+
+B0
+
+    Magnetic field strength (in Tesla).
+
+B0_dir
+
+    B0 field direction.
+
+phase_offset
+
+    Phase offset (in radians).
+
+generate_phase_offset
+
+    Boolean to control phase offset generation.
+
+generate_shim_field
+
+    Boolean to control shim field generation.
+
+voxel_size
+
+    Voxel size (in mm).
+
+peak_snr
+
+    Peak signal-to-noise ratio.
+
+
+### _class_ qsm_forward.TissueParams(root_dir='', chi_fname='ChiModelMIX_noCalc.nii.gz', M0_fname='M0.nii.gz', R1_fname='R1.nii.gz', R2star_fname='R2star.nii.gz', mask_fname='BrainMask.nii.gz', seg_fname='SegmentedModel.nii.gz')
+A class used to represent tissue parameters.
+
+## Attributes
+
+chi_path
+
+    The path to the Chi file.
+
+M0_path
+
+    The path to the M0 file.
+
+R1_path
+
+    The path to the R1 file.
+
+R2star_path
+
+    The path to the R2\* file.
+
+mask_path
+
+    The path to the brain mask file.
+
+seg_path
+
+    The path to the segmentation file.
+
+
 ### qsm_forward.add_noise(sig, peak_snr=inf)
 Add complex Gaussian noise to a signal.
 
@@ -70,21 +158,16 @@ numpy.ndarray
 
 
 ### qsm_forward.generate_bids(tissue_params, recon_params, bids_dir)
-Generate T2\*-weighted MRI signals and save the outputs in the BIDS-compliant format.
+Simulate T2\*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
 This function simulates a T2\*-weighted MRI signal based on a ground truth susceptibility map,
-computes the necessary parameters, and saves the outputs (images, JSON headers) in the BIDS-compliant
-format in the specified directory.
+and saves the outputs (images, JSON headers) in the BIDS-compliant format in the specified
+directory.
 
 Parameters:
-tissue_params (dict): A dictionary containing paths to different tissue parameter files.
+tissue_params (TissueParams): Provides paths to different tissue parameter files.
 
-> Keys are: “chi_path”, “M0_path”, “R1_path”, “R2star_path”, “mask_path”, and “seg_path”.
-
-recon_params (dict): A dictionary containing the parameters for the reconstruction simulation.
-
-    Keys are: “Subject”, “Session”, “Run”, “TR”, “TEs”, “flip_angle”, “B0”, “B0_dir”,
-    “phase_offset”, “shimm”, “voxel_size”, “peak_snr”.
+recon_params (ReconParams): Provides parameters for the simulated reconstruction.
 
 bids_dir (str): The directory where the BIDS-formatted outputs will be saved.
 
