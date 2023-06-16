@@ -63,7 +63,7 @@ bids/
 
 Some repesentative images including the mask, first and last-echo phase image, and ground truth susceptibility (chi):
 
-[Image](https://i.imgur.com/dtklHUh.png)!
+![Image](https://i.imgur.com/dtklHUh.png)
 
 ## Example using head phantom data
 
@@ -162,6 +162,6 @@ bids/
 
 Some repesentative images including the ground truth chi map, first-echo magnitude image, and first and last-echo phase images:
 
-[Image](https://i.imgur.com/cE1cQ3U.png)!
+![Image](https://i.imgur.com/cE1cQ3U.png)
 
 
