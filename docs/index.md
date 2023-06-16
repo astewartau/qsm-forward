@@ -43,6 +43,9 @@ contain the root `toctree` directive. -->
     * [`resize()`](qsm_forward.md#qsm_forward.resize)
 
 
+    * [`simulate_susceptibility_sources()`](qsm_forward.md#qsm_forward.simulate_susceptibility_sources)
+
+
 # Indices and tables
 
 

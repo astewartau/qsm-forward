@@ -1,7 +1,7 @@
 # qsm_forward
 
 
-### _class_ qsm_forward.ReconParams(subject='1', session='1', run='1', TR=50000.0, TEs=array([0.004, 0.012, 0.02, 0.028]), flip_angle=15, B0=7, B0_dir=array([0, 0, 1]), phase_offset=0, generate_phase_offset=True, generate_shim_field=True, voxel_size=array([1., 1., 1.]), peak_snr=inf)
+### _class_ qsm_forward.ReconParams(subject='1', session='1', run='1', TR=0.05, TEs=array([0.004, 0.012, 0.02, 0.028]), flip_angle=15, B0=7, B0_dir=array([0, 0, 1]), phase_offset=0, generate_phase_offset=True, generate_shim_field=True, voxel_size=array([1., 1., 1.]), peak_snr=inf)
 A class used to represent reconstruction parameters.
 
 ## Attributes
@@ -59,34 +59,34 @@ peak_snr
     Peak signal-to-noise ratio.
 
 
-### _class_ qsm_forward.TissueParams(root_dir='', chi_fname='ChiModelMIX_noCalc.nii.gz', M0_fname='M0.nii.gz', R1_fname='R1.nii.gz', R2star_fname='R2star.nii.gz', mask_fname='BrainMask.nii.gz', seg_fname='SegmentedModel.nii.gz')
+### _class_ qsm_forward.TissueParams(root_dir='', chi='ChiModelMIX_noCalc.nii.gz', M0='M0.nii.gz', R1='R1.nii.gz', R2star='R2star.nii.gz', mask='BrainMask.nii.gz', seg='SegmentedModel.nii.gz')
 A class used to represent tissue parameters.
 
 ## Attributes
 
 chi_path
 
-    The path to the Chi file.
+    The path to the Chi file or a 3D numpy array containing Chi values.
 
 M0_path
 
-    The path to the M0 file.
+    The path to the M0 file or a 3D numpy array containing M0 values.
 
 R1_path
 
-    The path to the R1 file.
+    The path to the R1 file or a 3D numpy array containing R1 values.
 
 R2star_path
 
-    The path to the R2\* file.
+    The path to the R2\* file or a 3D numpy array containing R2\* values.
 
 mask_path
 
-    The path to the brain mask file.
+    The path to the brain mask file or a 3D numpy array containing brain mask values.
 
 seg_path
 
-    The path to the segmentation file.
+    The path to the segmentation file or a 3D numpy array containing segmentation values.
 
 
 ### qsm_forward.add_noise(sig, peak_snr=inf)
@@ -157,22 +157,32 @@ numpy.ndarray
     The cropped volume.
 
 
-### qsm_forward.generate_bids(tissue_params, recon_params, bids_dir)
+### qsm_forward.generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir)
 Simulate T2\*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
 This function simulates a T2\*-weighted MRI signal based on a ground truth susceptibility map,
 and saves the outputs (images, JSON headers) in the BIDS-compliant format in the specified
 directory.
 
-Parameters:
-tissue_params (TissueParams): Provides paths to different tissue parameter files.
+## Parameters
 
-recon_params (ReconParams): Provides parameters for the simulated reconstruction.
+tissue_params
 
-bids_dir (str): The directory where the BIDS-formatted outputs will be saved.
+    Provides paths to different tissue parameter files or the 3D numpy arrays themselves.
 
-Returns:
-None. Outputs are saved as files in the bids_dir directory.
+recon_params
+
+    Provides parameters for the simulated reconstruction.
+
+bids_dir
+
+    The directory where the BIDS-formatted outputs will be saved.
+
+## Returns
+
+None
+
+    Outputs are saved as files in the bids_dir directory.
 
 
 ### qsm_forward.generate_field(chi)
@@ -326,3 +336,44 @@ interpolation
 nibabel.nifti1.Nifti1Image
 
     The resized Nifti image.
+
+
+### qsm_forward.simulate_susceptibility_sources(simulation_dim=160, rectangles_total=50, spheres_total=50, sus_std=1, shape_size_min_factor=0.01, shape_size_max_factor=0.5)
+This function simulates susceptibility sources by generating a three-dimensional numpy array, 
+and populating it with a certain number of randomly generated and positioned rectangular prisms and spheres.
+
+## Parameters
+
+simulation_dim
+
+    The size of the simulation space in each dimension (i.e., the simulation space is simulation_dim^3).
+
+rectangles_total
+
+    The total number of rectangular prisms to generate in the simulation space.
+
+spheres_total
+
+    The total number of spheres to generate in the simulation space.
+
+sus_std
+
+    The standard deviation of the Gaussian distribution from which susceptibility values are drawn.
+
+shape_size_min_factor
+
+    A factor to determine the minimum size of the shapes (both rectangular prisms and spheres). 
+    The actual minimum size in each dimension is calculated as simulation_dim \* shape_size_min_factor.
+
+shape_size_max_factor
+
+    A factor to determine the maximum size of the shapes (both rectangular prisms and spheres). 
+    The actual maximum size in each dimension is calculated as simulation_dim \* shape_size_max_factor.
+
+## Returns
+
+temp_sources
+
+    A three-dimensional numpy array of size (simulation_dim, simulation_dim, simulation_dim) 
+    that contains the simulated susceptibility sources. Rectangular prisms and spheres have susceptibility 
+    values drawn from a Gaussian distribution, while all other points are set to zero.

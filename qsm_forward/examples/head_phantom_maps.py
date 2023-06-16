@@ -1,3 +1,15 @@
+"""
+This script uses the qsm_forward library to generate BIDS-compliant files 
+from MRI simulations. 
+
+The simulations are carried out with various reconstruction parameters 
+(which include different voxel sizes), and the results are saved in the "bids" directory.
+
+The tissue parameters are loaded from the directory "../head-phantom-maps".
+
+Author: Ashley Stewart (a.stewart.au@gmail.com)
+"""
+
 import qsm_forward
 import numpy as np
 

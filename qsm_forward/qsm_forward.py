@@ -18,37 +18,70 @@ class TissueParams:
 
     Attributes
     ----------
-    chi_path : str
-        The path to the Chi file.
-    M0_path : str
-        The path to the M0 file.
-    R1_path : str
-        The path to the R1 file.
-    R2star_path : str
-        The path to the R2* file.
-    mask_path : str
-        The path to the brain mask file.
-    seg_path : str
-        The path to the segmentation file.
+    chi_path : str or ndarray
+        The path to the Chi file or a 3D numpy array containing Chi values.
+    M0_path : str or ndarray
+        The path to the M0 file or a 3D numpy array containing M0 values.
+    R1_path : str or ndarray
+        The path to the R1 file or a 3D numpy array containing R1 values.
+    R2star_path : str or ndarray
+        The path to the R2* file or a 3D numpy array containing R2* values.
+    mask_path : str or ndarray
+        The path to the brain mask file or a 3D numpy array containing brain mask values.
+    seg_path : str or ndarray
+        The path to the segmentation file or a 3D numpy array containing segmentation values.
     """
 
     def __init__(
             self,
             root_dir = "",
-            chi_fname = "ChiModelMIX_noCalc.nii.gz",
-            M0_fname = "M0.nii.gz",
-            R1_fname = "R1.nii.gz",
-            R2star_fname = "R2star.nii.gz",
-            mask_fname = "BrainMask.nii.gz",
-            seg_fname = "SegmentedModel.nii.gz"
+            chi = "ChiModelMIX_noCalc.nii.gz",
+            M0 = "M0.nii.gz",
+            R1 = "R1.nii.gz",
+            R2star = "R2star.nii.gz",
+            mask = "BrainMask.nii.gz",
+            seg = "SegmentedModel.nii.gz"
     ):
-        self.chi_path = os.path.join(root_dir, chi_fname)
-        self.M0_path = os.path.join(root_dir, M0_fname)
-        self.R1_path = os.path.join(root_dir, R1_fname)
-        self.R2star_path = os.path.join(root_dir, R2star_fname)
-        self.mask_path = os.path.join(root_dir, mask_fname)
-        self.seg_path = os.path.join(root_dir, seg_fname)
-        
+        if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
+            raise ValueError(f"Path to chi is invalid! ({os.path.join(root_dir, chi)})")
+        self._chi = os.path.join(root_dir, chi) if isinstance(chi, str) and os.path.exists(os.path.join(root_dir, chi)) else chi if not isinstance(chi, str) else None
+        self._M0 = os.path.join(root_dir, M0) if isinstance(M0, str) and os.path.exists(os.path.join(root_dir, M0)) else M0 if not isinstance(M0, str) else None
+        self._R1 = os.path.join(root_dir, R1) if isinstance(R1, str) and os.path.exists(os.path.join(root_dir, R1)) else R1 if not isinstance(R1, str) else None
+        self._R2star = os.path.join(root_dir, R2star) if isinstance(R2star, str) and os.path.exists(os.path.join(root_dir, R2star)) else R2star if not isinstance(R2star, str) else None
+        self._mask = os.path.join(root_dir, mask) if isinstance(mask, str) and os.path.exists(os.path.join(root_dir, mask)) else mask if not isinstance(mask, str) else None
+        self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
+
+    @property
+    def nii_header(self):
+        if isinstance(self._chi, str):
+            return nib.load(self._chi).header
+        header = nib.Nifti1Header()
+        return header
+    
+    @property
+    def nii_affine(self):
+        if isinstance(self._chi, str):
+            return nib.load(self._chi).affine
+        return np.eye(4)
+
+    @property
+    def chi(self): return nib.load(self._chi) if isinstance(self._chi, str) else nib.Nifti1Image(self._chi, affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def mask(self): return nib.load(self._mask) if isinstance(self._mask, str) else nib.Nifti1Image(self._mask or np.array(self._chi != 0), affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def M0(self): return nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def R1(self): return nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header)
+    
+    @property
+    def R2star(self): return nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.array(self.mask.get_fdata() * 50), affine=self.nii_affine, header=self.nii_header)
+    
+    @property
+    def seg(self): return nib.load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
+    
 
 class ReconParams:
     """
@@ -89,7 +122,7 @@ class ReconParams:
             subject="1",
             session="1",
             run="1",
-            TR=50e3,
+            TR=50e-3,
             TEs=np.array([ 4e-3, 12e-3, 20e-3, 28e-3 ]),
             flip_angle=15,
             B0=7,
@@ -114,7 +147,7 @@ class ReconParams:
         self.voxel_size = voxel_size
         self.peak_snr = peak_snr
 
-def generate_bids(tissue_params, recon_params, bids_dir):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -122,15 +155,19 @@ def generate_bids(tissue_params, recon_params, bids_dir):
     and saves the outputs (images, JSON headers) in the BIDS-compliant format in the specified
     directory.
 
-    Parameters:
-    tissue_params (TissueParams): Provides paths to different tissue parameter files.
+    Parameters
+    ----------
+    tissue_params : TissueParams
+        Provides paths to different tissue parameter files or the 3D numpy arrays themselves.
+    recon_params : ReconParams
+        Provides parameters for the simulated reconstruction.
+    bids_dir : str
+        The directory where the BIDS-formatted outputs will be saved.
 
-    recon_params (ReconParams): Provides parameters for the simulated reconstruction.
-
-    bids_dir (str): The directory where the BIDS-formatted outputs will be saved.
-
-    Returns:
-    None. Outputs are saved as files in the bids_dir directory.
+    Returns
+    -------
+    None
+        Outputs are saved as files in the bids_dir directory.
 
     """
 
@@ -145,44 +182,30 @@ def generate_bids(tissue_params, recon_params, bids_dir):
     os.makedirs(os.path.join(session_dir, 'extra_data'), exist_ok=True)
 
     # image-space resizing
-    chi_nii = nib.load(tissue_params.chi_path)
     print("Image-space resizing of chi...")
-    chi_downsampled_nii = resize(chi_nii, recon_params.voxel_size)
+    chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
     nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
-    if os.path.exists(str(tissue_params.mask_path)):
-        print("Image-space cropping of mask...")
-        mask_downsampled_nii = resize(nib.load(tissue_params.mask_path), recon_params.voxel_size, 'nearest')
-        nib.save(mask_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
-        del mask_downsampled_nii
-    if os.path.exists(str(tissue_params.seg_path)):
-        print("Image-space cropping of segmentation...")
-        seg_downsampled_nii = resize(nib.load(tissue_params.seg_path), recon_params.voxel_size, 'nearest')
-        nib.save(seg_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
-        del seg_downsampled_nii
+    print("Image-space cropping of mask...")
+    nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
+    print("Image-space cropping of segmentation...")
+    nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
 
     # calculate field
     print("Computing field model...")
-    chi = chi_nii.get_fdata()
-    field = generate_field(chi)
-    del chi
+    field = generate_field(tissue_params.chi.get_fdata())
 
     # simulate shim field
-    mask = nib.load(tissue_params.mask_path).get_fdata() if os.path.exists(tissue_params.mask_path) else np.ones(field.shape)
     if recon_params.generate_shim_field:
         print("Computing shim fields...")
-        _, field, _ = generate_shimmed_field(field, mask, order=2)
+        _, field, _ = generate_shimmed_field(field, tissue_params.mask.get_fdata(), order=2)
 
     # phase offset
-    M0 = nib.load(tissue_params.M0_path).get_fdata() if os.path.exists(tissue_params.M0_path) else np.ones(field.shape) * mask
     if recon_params.generate_phase_offset:
         print("Computing phase offset...")
-        phase_offset = recon_params.phase_offset + generate_phase_offset(M0, mask, M0.shape)
+        phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
-    R1 = nib.load(tissue_params.R1_path).get_fdata() if os.path.exists(tissue_params.R1_path) else np.ones(field.shape) * mask
-    R2star = nib.load(tissue_params.R2star_path).get_fdata() if os.path.exists(tissue_params.R2star_path) else np.ones(field.shape) * mask
-    del mask
     for i in range(len(recon_params.TEs)):
         print(f"Computing MR signal for echo {i+1}...")
         recon_name_i = f"{recon_name}_echo-{i+1}" if multiecho else recon_name
@@ -194,14 +217,14 @@ def generate_bids(tissue_params, recon_params, bids_dir):
             TE=recon_params.TEs[i],
             flip_angle=recon_params.flip_angle,
             phase_offset=phase_offset,
-            R1=R1,
-            R2star=R2star,
-            M0=M0
+            R1=tissue_params.R1.get_fdata(),
+            R2star=tissue_params.R2star.get_fdata(),
+            M0=tissue_params.M0.get_fdata()
         )
     
         # k-space cropping of sigHR
         print(f"k-space cropping of MR signal for echo {i+1}...")
-        resolution = np.array(np.round((np.array(chi_nii.header.get_zooms()) / recon_params.voxel_size) * np.array(chi_nii.header.get_data_shape())), dtype=int)
+        resolution = np.array(np.round((np.array(tissue_params.chi.header.get_zooms()) / recon_params.voxel_size) * np.array(tissue_params.chi.header.get_data_shape())), dtype=int)
         sigHR_cropped = crop_kspace(sigHR, resolution)
         del sigHR
 
@@ -391,7 +414,7 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
 
     sigHR = M0 * np.exp(1j * (2 * np.pi * field * B0 * 42.58 * TE + phase_offset)) * np.exp(-TE * R2star) \
         * (1 - np.exp(-TR * R1)) * np.sin(np.deg2rad(flip_angle)) / (1 - np.cos(np.deg2rad(flip_angle)) * np.exp(-TR * R1))
-    sigHR[np.isnan(sigHR)] = 0
+    sigHR[np.isnan(sigHR)]
 
     return sigHR
 
@@ -410,7 +433,6 @@ def add_noise(sig, peak_snr=np.inf):
     -------
     numpy.ndarray
         The input signal with added noise.
-
     """
 
     noise = np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
@@ -636,5 +658,101 @@ def _create_model(x1, y1, z1, dim, order):
         model[:, 8] = model[:, 3] * model[:, 1] # x^1 y^0 z^1 - siemens xz
 
     return model
+
+def simulate_susceptibility_sources(
+    simulation_dim=160,
+    rectangles_total=50,
+    spheres_total=50,
+    sus_std=1,
+    shape_size_min_factor=0.01,
+    shape_size_max_factor=0.5,
+):
+    """
+    This function simulates susceptibility sources by generating a three-dimensional numpy array, 
+    and populating it with a certain number of randomly generated and positioned rectangular prisms and spheres.
+    
+    Parameters
+    ----------
+    simulation_dim : int
+        The size of the simulation space in each dimension (i.e., the simulation space is simulation_dim^3).
+        
+    rectangles_total : int
+        The total number of rectangular prisms to generate in the simulation space.
+        
+    spheres_total : int
+        The total number of spheres to generate in the simulation space.
+        
+    sus_std : float
+        The standard deviation of the Gaussian distribution from which susceptibility values are drawn.
+        
+    shape_size_min_factor : float
+        A factor to determine the minimum size of the shapes (both rectangular prisms and spheres). 
+        The actual minimum size in each dimension is calculated as simulation_dim * shape_size_min_factor.
+        
+    shape_size_max_factor : float
+        A factor to determine the maximum size of the shapes (both rectangular prisms and spheres). 
+        The actual maximum size in each dimension is calculated as simulation_dim * shape_size_max_factor.
+        
+    Returns
+    -------
+    temp_sources : ndarray
+        A three-dimensional numpy array of size (simulation_dim, simulation_dim, simulation_dim) 
+        that contains the simulated susceptibility sources. Rectangular prisms and spheres have susceptibility 
+        values drawn from a Gaussian distribution, while all other points are set to zero.
+    """
+
+    temp_sources = np.zeros((simulation_dim, simulation_dim, simulation_dim))
+
+    # Generate rectangles
+    for shapes in range(rectangles_total):
+        shrink_factor = 1 / ((shapes / rectangles_total + 1))
+        shape_size_min = np.floor(
+            simulation_dim * shrink_factor * shape_size_min_factor
+        )
+        shape_size_max = np.floor(
+            simulation_dim * shrink_factor * shape_size_max_factor
+        )
+
+        susceptibility_value = np.random.normal(loc=0.0, scale=sus_std)
+        random_sizex = np.random.randint(low=shape_size_min, high=shape_size_max)
+        random_sizey = np.random.randint(low=shape_size_min, high=shape_size_max)
+        random_sizez = np.random.randint(low=shape_size_min, high=shape_size_max)
+        x_pos = np.random.randint(simulation_dim)
+        y_pos = np.random.randint(simulation_dim)
+        z_pos = np.random.randint(simulation_dim)
+
+        x_pos_max = x_pos + random_sizex
+        if x_pos_max >= simulation_dim:
+            x_pos_max = simulation_dim
+
+        y_pos_max = y_pos + random_sizey
+        if y_pos_max >= simulation_dim:
+            y_pos_max = simulation_dim
+
+        z_pos_max = z_pos + random_sizez
+        if z_pos_max >= simulation_dim:
+            z_pos_max = simulation_dim
+
+        temp_sources[
+            x_pos:x_pos_max, y_pos:y_pos_max, z_pos:z_pos_max
+        ] = susceptibility_value
+
+    # Generate spheres
+    for sphere in range(spheres_total):
+        susceptibility_value = np.random.normal(loc=0.0, scale=sus_std)
+        sphere_radius = np.random.randint(low=shape_size_min//2, high=shape_size_max//2)
+        x_center = np.random.randint(simulation_dim)
+        y_center = np.random.randint(simulation_dim)
+        z_center = np.random.randint(simulation_dim)
+
+        # Iterate over the 3D array
+        for x in range(max(0, x_center-sphere_radius), min(simulation_dim, x_center+sphere_radius)):
+            for y in range(max(0, y_center-sphere_radius), min(simulation_dim, y_center+sphere_radius)):
+                for z in range(max(0, z_center-sphere_radius), min(simulation_dim, z_center+sphere_radius)):
+                    # Determine if this point is inside the sphere
+                    if (x - x_center) ** 2 + (y - y_center) ** 2 + (z - z_center) ** 2 <= sphere_radius ** 2:
+                        temp_sources[x, y, z] = susceptibility_value
+
+    return temp_sources
 
 
