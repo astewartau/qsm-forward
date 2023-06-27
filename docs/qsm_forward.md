@@ -1,7 +1,7 @@
 # qsm_forward
 
 
-### _class_ qsm_forward.ReconParams(subject='1', session='1', run='1', TR=0.05, TEs=array([0.004, 0.012, 0.02, 0.028]), flip_angle=15, B0=7, B0_dir=array([0, 0, 1]), phase_offset=0, generate_phase_offset=True, generate_shim_field=True, voxel_size=array([1., 1., 1.]), peak_snr=inf)
+### _class_ qsm_forward.ReconParams(subject='1', session='1', run='1', TR=0.05, TEs=array([0.004, 0.012, 0.02, 0.028]), flip_angle=15, B0=7, B0_dir=array([0, 0, 1]), phase_offset=0, generate_phase_offset=True, generate_shim_field=True, voxel_size=array([1., 1., 1.]), peak_snr=inf, random_seed=None)
 A class used to represent reconstruction parameters.
 
 ## Attributes
@@ -58,6 +58,10 @@ peak_snr
 
     Peak signal-to-noise ratio.
 
+random_seed
+
+    Random seed to use for noise.
+
 
 ### _class_ qsm_forward.TissueParams(root_dir='', chi='ChiModelMIX_noCalc.nii.gz', M0='M0.nii.gz', R1='R1.nii.gz', R2star='R2star.nii.gz', mask='BrainMask.nii.gz', seg='SegmentedModel.nii.gz')
 A class used to represent tissue parameters.
@@ -89,7 +93,7 @@ seg_path
     The path to the segmentation file or a 3D numpy array containing segmentation values.
 
 
-### qsm_forward.add_noise(sig, peak_snr=inf)
+### qsm_forward.add_noise(sig, peak_snr=inf, rng=None)
 Add complex Gaussian noise to a signal.
 
 ## Parameters
@@ -101,6 +105,10 @@ sig
 peak_snr
 
     The peak signal-to-noise ratio, by default np.inf
+
+rng
+
+    A random number Generator. If None, a new Generator will be created.
 
 ## Returns
 
@@ -185,7 +193,7 @@ None
     Outputs are saved as files in the bids_dir directory.
 
 
-### qsm_forward.generate_field(chi)
+### qsm_forward.generate_field(chi, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1])
 Perform the forward convolution operation.
 
 This function performs the forward convolution step of the QSM simulation.
@@ -338,7 +346,7 @@ nibabel.nifti1.Nifti1Image
     The resized Nifti image.
 
 
-### qsm_forward.simulate_susceptibility_sources(simulation_dim=160, rectangles_total=50, spheres_total=50, sus_std=1, shape_size_min_factor=0.01, shape_size_max_factor=0.5)
+### qsm_forward.simulate_susceptibility_sources(simulation_dim=160, rectangles_total=50, spheres_total=50, sus_std=1, shape_size_min_factor=0.01, shape_size_max_factor=0.5, seed=None)
 This function simulates susceptibility sources by generating a three-dimensional numpy array, 
 and populating it with a certain number of randomly generated and positioned rectangular prisms and spheres.
 
@@ -369,6 +377,10 @@ shape_size_max_factor
 
     A factor to determine the maximum size of the shapes (both rectangular prisms and spheres). 
     The actual maximum size in each dimension is calculated as simulation_dim \* shape_size_max_factor.
+
+seed
+
+    A seed for the random number generator. If None, a random seed will be used.
 
 ## Returns
 

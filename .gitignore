@@ -4,3 +4,4 @@ qsm_forward.egg-info/
 *.nii*
 *__pycache__*
 *bids/
+qsm/

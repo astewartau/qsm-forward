@@ -115,6 +115,8 @@ class ReconParams:
         Voxel size (in mm).
     peak_snr : float
         Peak signal-to-noise ratio.
+    random_seed : int
+        Random seed to use for noise.
     """
 
     def __init__(
@@ -131,7 +133,8 @@ class ReconParams:
             generate_phase_offset=True,
             generate_shim_field=True,
             voxel_size=np.array([1.0, 1.0, 1.0]),
-            peak_snr=np.inf
+            peak_snr=np.inf,
+            random_seed=None
         ):
         self.subject = subject
         self.session = session
@@ -146,6 +149,7 @@ class ReconParams:
         self.generate_shim_field = generate_shim_field
         self.voxel_size = voxel_size
         self.peak_snr = peak_snr
+        self.random_seed = random_seed
 
 def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir):
     """
@@ -181,6 +185,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     os.makedirs(os.path.join(session_dir, 'anat'), exist_ok=True)
     os.makedirs(os.path.join(session_dir, 'extra_data'), exist_ok=True)
 
+    # random number generator for noise etc.
+    rng = np.random.default_rng(recon_params.random_seed)
+
     # image-space resizing
     print("Image-space resizing of chi...")
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
@@ -192,7 +199,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     # calculate field
     print("Computing field model...")
-    field = generate_field(tissue_params.chi.get_fdata())
+    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=recon_params.voxel_size, B0_dir=recon_params.B0_dir)
 
     # simulate shim field
     if recon_params.generate_shim_field:
@@ -230,13 +237,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
         # noise
         print(f"Simulating noise for echo {i+1}...")
-        sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr)
+        sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
         del sigHR_cropped
 
         # save nifti images
         mag_filename = f"{recon_name_i}_part-mag" + ("_MEGRE" if multiecho else "_T2starw")
         phs_filename = f"{recon_name_i}_part-phase" + ("_MEGRE" if multiecho else "_T2starw")
-        nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(session_dir, "anat", f"{mag_filename}.nii"))
+        nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy)*500, affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(session_dir, "anat", f"{mag_filename}.nii"))
         nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(session_dir, "anat", f"{phs_filename}.nii"))
 
         # json header
@@ -256,7 +263,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     print("Done!")
 
 
-def generate_field(chi):
+def generate_field(chi, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     """
     Perform the forward convolution operation.
 
@@ -274,7 +281,7 @@ def generate_field(chi):
 
     """
     dims = np.array(chi.shape)
-    D = _generate_3d_dipole_kernel(data_shape=dims, voxel_size=[1, 1, 1], b0_dir=[0, 0, 1])
+    D = _generate_3d_dipole_kernel(data_shape=dims, voxel_size=voxel_size, B0_dir=B0_dir)
     
     chitemp = np.ones(2 * dims) * chi[-1, -1, -1]
     chitemp[:dims[0], :dims[1], :dims[2]] = chi
@@ -418,7 +425,7 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
 
     return sigHR
 
-def add_noise(sig, peak_snr=np.inf):
+def add_noise(sig, peak_snr=np.inf, rng=None):
     """
     Add complex Gaussian noise to a signal.
 
@@ -428,6 +435,8 @@ def add_noise(sig, peak_snr=np.inf):
         The input signal to which noise will be added.
     peak_snr : float, optional
         The peak signal-to-noise ratio, by default np.inf
+    rng : numpy.random.Generator, optional
+        A random number Generator. If None, a new Generator will be created.
 
     Returns
     -------
@@ -435,7 +444,11 @@ def add_noise(sig, peak_snr=np.inf):
         The input signal with added noise.
     """
 
-    noise = np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
+    # Create a new RNG if one was not provided
+    if rng is None:
+        rng = np.random.default_rng()
+
+    noise = rng.standard_normal(sig.shape) + 1j * rng.standard_normal(sig.shape)
     sig_noisy = sig + (noise * np.max(np.abs(sig))) / peak_snr
     return sig_noisy
 
@@ -541,7 +554,7 @@ def crop_kspace(volume, dims, scaling=False, gibbs_correction=True):
     return working_volume
 
 
-def _generate_3d_dipole_kernel(data_shape, voxel_size, b0_dir):
+def _generate_3d_dipole_kernel(data_shape, voxel_size, B0_dir):
     """
     Generate a 3D dipole kernel.
 
@@ -553,7 +566,7 @@ def _generate_3d_dipole_kernel(data_shape, voxel_size, b0_dir):
         The shape of the data array (nx, ny, nz).
     voxel_size : list of float
         The size of a voxel in each direction (dx, dy, dz).
-    b0_dir : list of float
+    B0_dir : list of float
         The direction of the B0 field (B0x, B0y, B0z).
 
     Returns
@@ -574,7 +587,7 @@ def _generate_3d_dipole_kernel(data_shape, voxel_size, b0_dir):
 
     k2 = kx**2 + ky**2 + kz**2
     k2[k2 == 0] = np.finfo(float).eps
-    D = np.fft.fftshift(1 / 3 - ((kx * b0_dir[0] + ky * b0_dir[1] + kz * b0_dir[2])**2 / k2))
+    D = np.fft.fftshift(1 / 3 - ((kx * B0_dir[0] + ky * B0_dir[1] + kz * B0_dir[2])**2 / k2))
     
     return D
 
@@ -666,6 +679,7 @@ def simulate_susceptibility_sources(
     sus_std=1,
     shape_size_min_factor=0.01,
     shape_size_max_factor=0.5,
+    seed=None
 ):
     """
     This function simulates susceptibility sources by generating a three-dimensional numpy array, 
@@ -692,6 +706,9 @@ def simulate_susceptibility_sources(
     shape_size_max_factor : float
         A factor to determine the maximum size of the shapes (both rectangular prisms and spheres). 
         The actual maximum size in each dimension is calculated as simulation_dim * shape_size_max_factor.
+
+    seed : int, optional
+        A seed for the random number generator. If None, a random seed will be used.
         
     Returns
     -------
@@ -703,6 +720,9 @@ def simulate_susceptibility_sources(
 
     temp_sources = np.zeros((simulation_dim, simulation_dim, simulation_dim))
 
+    # Create a new generator instance with the provided seed if one was given
+    rng = np.random.default_rng(seed)
+
     # Generate rectangles
     for shapes in range(rectangles_total):
         shrink_factor = 1 / ((shapes / rectangles_total + 1))
@@ -713,13 +733,13 @@ def simulate_susceptibility_sources(
             simulation_dim * shrink_factor * shape_size_max_factor
         )
 
-        susceptibility_value = np.random.normal(loc=0.0, scale=sus_std)
-        random_sizex = np.random.randint(low=shape_size_min, high=shape_size_max)
-        random_sizey = np.random.randint(low=shape_size_min, high=shape_size_max)
-        random_sizez = np.random.randint(low=shape_size_min, high=shape_size_max)
-        x_pos = np.random.randint(simulation_dim)
-        y_pos = np.random.randint(simulation_dim)
-        z_pos = np.random.randint(simulation_dim)
+        susceptibility_value = rng.normal(loc=0.0, scale=sus_std)
+        random_sizex = rng.integers(low=shape_size_min, high=shape_size_max)
+        random_sizey = rng.integers(low=shape_size_min, high=shape_size_max)
+        random_sizez = rng.integers(low=shape_size_min, high=shape_size_max)
+        x_pos = rng.integers(simulation_dim)
+        y_pos = rng.integers(simulation_dim)
+        z_pos = rng.integers(simulation_dim)
 
         x_pos_max = x_pos + random_sizex
         if x_pos_max >= simulation_dim:
@@ -739,11 +759,11 @@ def simulate_susceptibility_sources(
 
     # Generate spheres
     for sphere in range(spheres_total):
-        susceptibility_value = np.random.normal(loc=0.0, scale=sus_std)
-        sphere_radius = np.random.randint(low=shape_size_min//2, high=shape_size_max//2)
-        x_center = np.random.randint(simulation_dim)
-        y_center = np.random.randint(simulation_dim)
-        z_center = np.random.randint(simulation_dim)
+        susceptibility_value = rng.normal(loc=0.0, scale=sus_std)
+        sphere_radius = rng.integers(low=shape_size_min//2, high=shape_size_max//2)
+        x_center = rng.integers(simulation_dim)
+        y_center = rng.integers(simulation_dim)
+        z_center = rng.integers(simulation_dim)
 
         # Iterate over the 3D array
         for x in range(max(0, x_center-sphere_radius), min(simulation_dim, x_center+sphere_radius)):
