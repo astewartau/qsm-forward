@@ -587,7 +587,7 @@ def _generate_3d_dipole_kernel(data_shape, voxel_size, B0_dir):
 
     k2 = kx**2 + ky**2 + kz**2
     k2[k2 == 0] = np.finfo(float).eps
-    D = np.fft.fftshift(1 / 3 - ((kx * B0_dir[0] + ky * B0_dir[1] + kz * B0_dir[2])**2 / k2))
+    D = np.fft.fftshift(1 / 3 - ((kx * B0_dir[1] + ky * B0_dir[0] + kz * B0_dir[2])**2 / k2))
     
     return D
 
