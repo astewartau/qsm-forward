@@ -517,7 +517,7 @@ def crop_imagespace(x, shape):
     res = x[tuple(idx)]
     return res
 
-def crop_kspace(volume, dims, scaling=False, gibbs_correction=True):
+def crop_kspace(volume, dims, scaling=True, gibbs_correction=True):
     """
     Crop a 3D volume in k-space and apply optional scaling and Gibbs ringing correction.
 
@@ -528,7 +528,7 @@ def crop_kspace(volume, dims, scaling=False, gibbs_correction=True):
     dims : tuple of int
         The desired dimensions after cropping.
     scaling : bool, optional
-        Whether to scale the cropped volume to maintain the total energy. Default is False.
+        Whether to scale the cropped volume to maintain the total energy. Default is True.
     gibbs_correction : bool, optional
         Whether to apply Gibbs ringing correction. Default is True.
 
