@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qsm-forward"
-version = "0.11"
+version = "0.12"
 authors = [
   { name="Ashley Stewart", email="a.stewart.au@gmail.com" },
 ]

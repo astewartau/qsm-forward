@@ -8,7 +8,7 @@ def main():
         description='Simulate magnitude and phase'
     )
     
-    parser.add_argument('maps', help='Head phantom maps directory')
+    parser.add_argument('maps', nargs="?", default=None, help='Head phantom maps directory')
     parser.add_argument('bids', help='Output BIDS directory')
     parser.add_argument('--subject', default='1')
     parser.add_argument('--session', default='1'),
@@ -26,7 +26,11 @@ def main():
 
     args = parser.parse_args()
 
-    tissue_params = qsm_forward.TissueParams(args.maps)
+    if args.maps is not None:
+        tissue_params = qsm_forward.TissueParams(args.maps)
+    else:
+        tissue_params = qsm_forward.TissueParams(chi=qsm_forward.simulate_susceptibility_sources())
+    
     recon_params = qsm_forward.ReconParams(
         subject=args.subject,
         session=args.session,
