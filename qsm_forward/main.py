@@ -14,13 +14,13 @@ def main():
     parser.add_argument('--session', default='1'),
     parser.add_argument('--run', default='1'),
     parser.add_argument('--TR', default=50e-3, type=float),
-    parser.add_argument('--TEs', default=np.array([ 4e-3, 12e-3, 20e-3, 28e-3 ]), type=np.ndarray)
+    parser.add_argument('--TEs', default=[ 4e-3, 12e-3, 20e-3, 28e-3 ], type=float, nargs='+')
     parser.add_argument('--flip_angle', default=15)
     parser.add_argument('--B0', default=7, type=float)
-    parser.add_argument('--B0-dir', default=np.array([0, 0, 1]), type=np.ndarray)
+    parser.add_argument('--B0-dir', default=[0., 0., 1.], type=float, nargs=3)
     parser.add_argument('--generate-phase-offset', default=True, type=bool)
     parser.add_argument('--generate-shim-field', default=True, type=bool)
-    parser.add_argument('--voxel-size', default=np.array([1, 1, 1]), type=np.ndarray)
+    parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
     parser.add_argument('--peak-snr', default=np.inf, type=float)
     parser.add_argument('--random-seed', default=None, type=int)
 
