@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--B0-dir', default=np.array([0, 0, 1]), type=np.ndarray)
     parser.add_argument('--generate-phase-offset', default=True, type=bool)
     parser.add_argument('--generate-shim-field', default=True, type=bool)
-    parser.add_argument('--voxel-size', default=np.array([1, 1, 1], type=np.ndarray))
+    parser.add_argument('--voxel-size', default=np.array([1, 1, 1]), type=np.ndarray)
     parser.add_argument('--peak-snr', default=np.inf, type=float)
     parser.add_argument('--random-seed', default=None, type=int)
 
