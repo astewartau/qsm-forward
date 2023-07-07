@@ -1,5 +1,6 @@
 import argparse
 import qsm_forward
+import numpy as np
 
 def main():
     
