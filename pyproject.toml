@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qsm-forward"
-version = "0.10"
+version = "0.11"
 authors = [
   { name="Ashley Stewart", email="a.stewart.au@gmail.com" },
 ]
@@ -22,3 +22,8 @@ classifiers=[
 [project.urls]
 "Homepage" = "https://github.com/astewartau/qsm-forward-model"
 "Bug Tracker" = "https://github.com/astewartau/qsm-forward-model/issues"
+
+[options.entry_points]
+console_scripts = [
+  "my-command = qsm_forward.main:main",
+]
