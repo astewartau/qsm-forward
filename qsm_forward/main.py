@@ -44,7 +44,7 @@ def main():
         random_seed=args.random_seed
     )
 
-    qsm_forward.generate_bids(tissue_params, recon_params)
+    qsm_forward.generate_bids(tissue_params, recon_params, args.bids)
 
 if __name__ == "__main__":
     main()
