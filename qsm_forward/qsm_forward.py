@@ -71,13 +71,13 @@ class TissueParams:
     def mask(self): return nib.load(self._mask) if isinstance(self._mask, str) else nib.Nifti1Image(self._mask or np.array(self._chi != 0), affine=self.nii_affine, header=self.nii_header)
 
     @property
-    def M0(self): return nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header)
+    def M0(self): return nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or 1), affine=self.nii_affine, header=self.nii_header)
 
     @property
-    def R1(self): return nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header)
+    def R1(self): return nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or 1), affine=self.nii_affine, header=self.nii_header)
     
     @property
-    def R2star(self): return nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.array(self.mask.get_fdata() * 50), affine=self.nii_affine, header=self.nii_header)
+    def R2star(self): return nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or 50), affine=self.nii_affine, header=self.nii_header)
     
     @property
     def seg(self): return nib.load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
