@@ -8,8 +8,8 @@ def main():
         description='Simulate magnitude and phase'
     )
     
-    parser.add_argument('maps', nargs="?", default=None, help='Head phantom maps directory')
     parser.add_argument('bids', help='Output BIDS directory')
+    parser.add_argument('--maps', default=None, help='Head phantom maps directory')
     parser.add_argument('--subject', default='1')
     parser.add_argument('--session', default='1'),
     parser.add_argument('--run', default='1'),
