@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 """
 This script uses the qsm_forward library to generate BIDS-compliant files 
 from MRI simulations. 
@@ -14,7 +16,7 @@ import qsm_forward
 import numpy as np
 
 if __name__ == "__main__":
-    tissue_params = qsm_forward.TissueParams("../head-phantom-maps")
+    tissue_params = qsm_forward.TissueParams("../head-phantom-maps", apply_mask=False)
     
     recon_params_all = [
         qsm_forward.ReconParams(voxel_size=voxel_size, peak_snr=100, session=session)

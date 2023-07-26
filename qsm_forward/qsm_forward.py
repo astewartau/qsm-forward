@@ -40,7 +40,8 @@ class TissueParams:
             R1 = "R1.nii.gz",
             R2star = "R2star.nii.gz",
             mask = "BrainMask.nii.gz",
-            seg = "SegmentedModel.nii.gz"
+            seg = "SegmentedModel.nii.gz",
+            apply_mask = False
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
             raise ValueError(f"Path to chi is invalid! ({os.path.join(root_dir, chi)})")
@@ -50,6 +51,12 @@ class TissueParams:
         self._R2star = os.path.join(root_dir, R2star) if isinstance(R2star, str) and os.path.exists(os.path.join(root_dir, R2star)) else R2star if not isinstance(R2star, str) else None
         self._mask = os.path.join(root_dir, mask) if isinstance(mask, str) and os.path.exists(os.path.join(root_dir, mask)) else mask if not isinstance(mask, str) else None
         self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
+        self._apply_mask = apply_mask
+
+    @property
+    def voxel_size(self):
+        zooms = self.nii_header.get_zooms()
+        return zooms if len(zooms) == 3 else np.array([zooms[0] for i in range(3)])
 
     @property
     def nii_header(self):
@@ -64,20 +71,22 @@ class TissueParams:
             return nib.load(self._chi).affine
         return np.eye(4)
 
+    def _do_apply_mask(self, nii): return nib.Nifti1Image(dataobj=nii.get_fdata() * self.mask.get_fdata(), affine=nii.affine, header=nii.header) if self._apply_mask else nii
+
     @property
-    def chi(self): return nib.load(self._chi) if isinstance(self._chi, str) else nib.Nifti1Image(self._chi, affine=self.nii_affine, header=self.nii_header)
+    def chi(self): return self._do_apply_mask(nib.load(self._chi) if isinstance(self._chi, str) else nib.Nifti1Image(self._chi, affine=self.nii_affine, header=self.nii_header))
 
     @property
     def mask(self): return nib.load(self._mask) if isinstance(self._mask, str) else nib.Nifti1Image(self._mask or np.array(self._chi != 0), affine=self.nii_affine, header=self.nii_header)
 
     @property
-    def M0(self): return nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.full((self.chi.get_fdata().shape), 1), affine=self.nii_affine, header=self.nii_header)
+    def M0(self): return self._do_apply_mask(nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
 
     @property
-    def R1(self): return nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.full((self.chi.get_fdata().shape), 1), affine=self.nii_affine, header=self.nii_header)
+    def R1(self): return self._do_apply_mask(nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
     
     @property
-    def R2star(self): return nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.full((self.chi.get_fdata().shape), 50), affine=self.nii_affine, header=self.nii_header)
+    def R2star(self): return self._do_apply_mask(nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.array(self.mask.get_fdata() * 50), affine=self.nii_affine, header=self.nii_header))
     
     @property
     def seg(self): return nib.load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
@@ -199,7 +208,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     # calculate field
     print("Computing field model...")
-    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=recon_params.voxel_size, B0_dir=recon_params.B0_dir)
+    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
+    nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field.nii"))
 
     # simulate shim field
     if recon_params.generate_shim_field:
@@ -528,7 +538,7 @@ def crop_kspace(volume, dims, scaling=True, gibbs_correction=True):
     dims : tuple of int
         The desired dimensions after cropping.
     scaling : bool, optional
-        Whether to scale the cropped volume to maintain the total energy. Default is False.
+        Whether to scale the cropped volume to maintain the total energy. Default is True.
     gibbs_correction : bool, optional
         Whether to apply Gibbs ringing correction. Default is True.
 
@@ -671,6 +681,44 @@ def _create_model(x1, y1, z1, dim, order):
         model[:, 8] = model[:, 3] * model[:, 1] # x^1 y^0 z^1 - siemens xz
 
     return model
+
+def generate_susceptibility_phantom(resolution, background, large_cylinder_val, small_cylinder_radii, small_cylinder_vals):
+    assert len(small_cylinder_radii) == len(small_cylinder_vals), "Number of small cylinders and their values should be the same"
+    
+    # Initialize the 3D array with the background value
+    array = np.full(resolution, fill_value=background, dtype=float)
+
+    # Calculate the center and the large radius
+    center = [res//2 for res in resolution]
+    large_radius = min(center[1:]) * 0.75
+
+    # Create coordinates for the 3D array
+    z,y,x = np.indices(resolution)
+    
+    # Calculate the lower and upper limit for the height
+    lower_limit1 = (1 - 0.75) / 2 * resolution[0]
+    upper_limit2 = (1 + 0.75) / 2 * resolution[0]
+
+    lower_limit3 = (1 - 0.6) / 2 * resolution[0]
+    upper_limit4 = (1 + 0.6) / 2 * resolution[0]
+    
+    # Create the large cylinder along x-axis
+    large_cylinder = ((z-center[2])**2 + (y-center[1])**2 < large_radius**2) & (x >= lower_limit1) & (x < upper_limit2)
+    array[large_cylinder] = large_cylinder_val
+
+    # Calculate angle between each small cylinder
+    angle = 2*np.pi/len(small_cylinder_radii)
+    
+    # Create the small cylinders
+    for i, (small_radius, small_val) in enumerate(zip(small_cylinder_radii, small_cylinder_vals)):
+        # Calculate center of the small cylinder
+        small_center_z = center[2] + large_radius/2 * np.cos(i*angle)
+        small_center_y = center[1] + large_radius/2 * np.sin(i*angle)
+        
+        small_cylinder = ((z-small_center_z)**2 + (y-small_center_y)**2 < small_radius**2) & (x >= lower_limit3) & (x < upper_limit4)
+        array[small_cylinder] = small_val
+    
+    return array
 
 def simulate_susceptibility_sources(
     simulation_dim=160,
