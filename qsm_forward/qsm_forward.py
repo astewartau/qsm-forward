@@ -53,6 +53,8 @@ class TissueParams:
         self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
         self._apply_mask = apply_mask
 
+    @property
+    def voxel_size(self): return self.nii_header.get_zooms()
 
     @property
     def nii_header(self):
@@ -204,7 +206,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     # calculate field
     print("Computing field model...")
-    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=recon_params.voxel_size, B0_dir=recon_params.B0_dir)
+    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
 
     # simulate shim field
     if recon_params.generate_shim_field:
