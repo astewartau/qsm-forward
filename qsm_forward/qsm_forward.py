@@ -160,7 +160,7 @@ class ReconParams:
         self.peak_snr = peak_snr
         self.random_seed = random_seed
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -176,6 +176,18 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         Provides parameters for the simulated reconstruction.
     bids_dir : str
         The directory where the BIDS-formatted outputs will be saved.
+    save_chi : bool
+        Whether to save the cropped chi map to the BIDS directory. Default is True.
+    save_mask : bool
+        Whether to save the cropped mask to the BIDS directory. Default is True.
+    save_segmentation : bool
+        Whether to save the cropped segmentation to the BIDS directory. Default is True.
+    save_field : bool
+        Whether to save the cropped field map to the BIDS directory. Default is False.
+    save_shimmed_field : bool
+        Whether to save the cropped and shimmed field map to the BIDS directory. Default is False.
+    save_shimmed_offset_field : bool
+        Whether to save the cropped, shimmed and offset field map to the BIDS directory. Default is False.
 
     Returns
     -------
@@ -200,26 +212,28 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     # image-space resizing
     print("Image-space resizing of chi...")
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
-    nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
+    if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
     print("Image-space cropping of mask...")
-    nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
+    if save_mask: nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
     print("Image-space cropping of segmentation...")
-    nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
+    if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
 
     # calculate field
     print("Computing field model...")
     field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
-    nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field.nii"))
+    if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field.nii"))
 
     # simulate shim field
     if recon_params.generate_shim_field:
         print("Computing shim fields...")
         _, field, _ = generate_shimmed_field(field, tissue_params.mask.get_fdata(), order=2)
+        if save_shimmed_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field-shimmed.nii"))
 
     # phase offset
     if recon_params.generate_phase_offset:
         print("Computing phase offset...")
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
+        if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field-shimmed-offset.nii"))
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
@@ -241,7 +255,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     
         # k-space cropping of sigHR
         print(f"k-space cropping of MR signal for echo {i+1}...")
-        resolution = np.array(np.round((np.array(tissue_params.chi.header.get_zooms()) / recon_params.voxel_size) * np.array(tissue_params.chi.header.get_data_shape())), dtype=int)
+        resolution = np.array(np.round((np.array(tissue_params.voxel_size) / recon_params.voxel_size) * np.array(tissue_params.nii_header.get_data_shape())), dtype=int)
         sigHR_cropped = crop_kspace(sigHR, resolution)
         del sigHR
 
