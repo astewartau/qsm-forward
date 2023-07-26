@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 """
 This script uses the qsm_forward library to generate BIDS-compliant files 
 from MRI simulations. 
