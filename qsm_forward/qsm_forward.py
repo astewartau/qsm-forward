@@ -54,7 +54,9 @@ class TissueParams:
         self._apply_mask = apply_mask
 
     @property
-    def voxel_size(self): return self.nii_header.get_zooms()
+    def voxel_size(self):
+        zooms = self.nii_header.get_zooms()
+        return zooms if len(zooms) == 3 else np.array([zooms[0] for i in range(3)])
 
     @property
     def nii_header(self):
@@ -679,6 +681,44 @@ def _create_model(x1, y1, z1, dim, order):
         model[:, 8] = model[:, 3] * model[:, 1] # x^1 y^0 z^1 - siemens xz
 
     return model
+
+def generate_susceptibility_phantom(resolution, background, large_cylinder_val, small_cylinder_radii, small_cylinder_vals):
+    assert len(small_cylinder_radii) == len(small_cylinder_vals), "Number of small cylinders and their values should be the same"
+    
+    # Initialize the 3D array with the background value
+    array = np.full(resolution, fill_value=background, dtype=float)
+
+    # Calculate the center and the large radius
+    center = [res//2 for res in resolution]
+    large_radius = min(center[1:]) * 0.75
+
+    # Create coordinates for the 3D array
+    z,y,x = np.indices(resolution)
+    
+    # Calculate the lower and upper limit for the height
+    lower_limit1 = (1 - 0.75) / 2 * resolution[0]
+    upper_limit2 = (1 + 0.75) / 2 * resolution[0]
+
+    lower_limit3 = (1 - 0.6) / 2 * resolution[0]
+    upper_limit4 = (1 + 0.6) / 2 * resolution[0]
+    
+    # Create the large cylinder along x-axis
+    large_cylinder = ((z-center[2])**2 + (y-center[1])**2 < large_radius**2) & (x >= lower_limit1) & (x < upper_limit2)
+    array[large_cylinder] = large_cylinder_val
+
+    # Calculate angle between each small cylinder
+    angle = 2*np.pi/len(small_cylinder_radii)
+    
+    # Create the small cylinders
+    for i, (small_radius, small_val) in enumerate(zip(small_cylinder_radii, small_cylinder_vals)):
+        # Calculate center of the small cylinder
+        small_center_z = center[2] + large_radius/2 * np.cos(i*angle)
+        small_center_y = center[1] + large_radius/2 * np.sin(i*angle)
+        
+        small_cylinder = ((z-small_center_z)**2 + (y-small_center_y)**2 < small_radius**2) & (x >= lower_limit3) & (x < upper_limit4)
+        array[small_cylinder] = small_val
+    
+    return array
 
 def simulate_susceptibility_sources(
     simulation_dim=160,
