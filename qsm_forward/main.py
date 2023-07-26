@@ -18,11 +18,17 @@ def main():
     parser.add_argument('--flip_angle', default=15)
     parser.add_argument('--B0', default=7, type=float)
     parser.add_argument('--B0-dir', default=[0., 0., 1.], type=float, nargs=3)
-    parser.add_argument('--generate-phase-offset', default=True, type=bool)
-    parser.add_argument('--generate-shim-field', default=True, type=bool)
+    parser.add_argument('--generate-phase-offset', action='store_true', default=True, type=bool)
+    parser.add_argument('--generate-shim-field', action='store_true', default=True, type=bool)
     parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
     parser.add_argument('--peak-snr', default=np.inf, type=float)
     parser.add_argument('--random-seed', default=None, type=int)
+    parser.add_argument('--save-chi', action='store_true', default=True, type=bool)
+    parser.add_argument('--save-mask', action='store_true', default=True, type=bool)
+    parser.add_argument('--save-segmentation', action='store_true', default=True, type=bool)
+    parser.add_argument('--save-field', action='store_true', default=False, type=bool)
+    parser.add_argument('--save-shimmed-field', action='store_true', default=False, type=bool)
+    parser.add_argument('--save-shimmed-offset-field', action='store_true', default=False, type=bool)
 
     args = parser.parse_args()
 
@@ -48,7 +54,17 @@ def main():
         random_seed=args.random_seed
     )
 
-    qsm_forward.generate_bids(tissue_params, recon_params, args.bids)
+    qsm_forward.generate_bids(
+        tissue_params,
+        recon_params,
+        args.bids,
+        save_chi=args.save_chi,
+        save_mask=args.save_mask,
+        save_segmentation=args.save_segmentation,
+        save_field=args.save_field,
+        save_shimmed_field=args.save_shimmed_field,
+        save_shimmed_offset_field=args.save_shimmed_offset_field
+    )
 
 if __name__ == "__main__":
     main()
