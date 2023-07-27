@@ -230,6 +230,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if save_shimmed_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field-shimmed.nii"))
 
     # phase offset
+    phase_offset = recon_params.phase_offset
     if recon_params.generate_phase_offset:
         print("Computing phase offset...")
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
