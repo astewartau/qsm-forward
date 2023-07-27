@@ -510,8 +510,12 @@ def resize(nii, voxel_size, interpolation='continuous'):
         The resized Nifti image.
 
     """
-    
+    original_shape = np.array(nii.header.get_data_shape())
     target_shape = np.array(np.round((np.array(nii.header.get_zooms()) / voxel_size) * np.array(nii.header.get_data_shape())), dtype=int)
+
+    if np.array_equal(original_shape, target_shape):
+        return nii
+
     target_affine = np.diag(list(voxel_size) + [1])
     
     return resample_img(
@@ -539,6 +543,9 @@ def crop_imagespace(x, shape):
         The cropped matrix.
 
     """
+
+    if np.array_equal(x.shape, np.array(shape)):
+        return x
         
     m = np.array(x.shape)
     s = np.array(shape)
@@ -576,6 +583,9 @@ def crop_kspace(volume, dims, scaling=True, gibbs_correction=True):
         The cropped volume.
 
     """
+
+    if np.array_equal(volume.shape, dims):
+        return volume
 
     working_volume = np.fft.ifftn(np.fft.ifftshift(crop_imagespace(np.fft.fftshift(np.fft.fftn(volume)), dims)))
     
