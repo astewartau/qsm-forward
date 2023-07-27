@@ -273,7 +273,20 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
         # json header
         print(f"Creating JSON headers...")
-        json_dict = { 'EchoTime': recon_params.TEs[i], 'MagneticFieldStrength': recon_params.B0, 'EchoNumber': i+1, 'ProtocolName': 'T2starw', 'ConversionSoftware': 'qsm-forward' }
+        json_dict = { 
+            'EchoTime': recon_params.TEs[i],
+            'MagneticFieldStrength': recon_params.B0,
+            'EchoNumber': i+1,
+            'ProtocolName': 'T2starw',
+            'ConversionSoftware': 'qsm-forward',
+            'RepetitionTime': recon_params.TR,
+            'FlipAngle': recon_params.flip_angle,
+            'B0_dir': recon_params.B0_dir.tolist(),
+            'PhaseOffset': recon_params.generate_phase_offset or phase_offset != 0,
+            'ShimmField': recon_params.generate_shim_field,
+            'VoxelSize': recon_params.voxel_size.tolist(),
+            'PeakSNR': recon_params.peak_snr if recon_params.peak_snr != np.inf else "inf"
+        }
 
         json_dict_phs = json_dict.copy()
         json_dict_phs['ImageType'] = ['P', 'PHASE']
