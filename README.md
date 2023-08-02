@@ -172,4 +172,57 @@ Some repesentative images including the ground truth chi map, first-echo magnitu
 
 ![Image](https://i.imgur.com/cE1cQ3U.png)
 
+## Example including T1-weighted images
+
+```python
+import qsm_forward
+import numpy as np
+
+if __name__ == "__main__":
+    tissue_params = qsm_forward.TissueParams("../head-phantom-maps", chi="ChiModelMIX.nii.gz")
+    
+    recon_params_all = [
+        qsm_forward.ReconParams(voxel_size=voxel_size, session=session, TEs=TEs, TR=TR, flip_angle=flip_angle, weighting_suffix=weighting_suffix, export_phase=export_phase)
+        for (voxel_size, session, TEs, TR, flip_angle, weighting_suffix, export_phase) in [
+            (np.array([0.64, 0.64, 0.64]), "0p64", np.array([3.5e-3]), 7.5e-3, 40, "T1w", False),
+            (np.array([0.64, 0.64, 0.64]), "0p64", np.array([0.004, 0.012, 0.02, 0.028]), 0.05, 15, "T2starw", True),
+        ]
+    ]
+
+    for recon_params in recon_params_all:    
+        qsm_forward.generate_bids(tissue_params=tissue_params, recon_params=recon_params, bids_dir="bids")
+```
+
+```
+bids/
+└── sub-1
+    └── ses-0p64
+        ├── anat
+        │   ├── sub-1_ses-0p64_run-1_echo-1_part-mag_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-1_part-mag_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-1_part-phase_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-1_part-phase_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-2_part-mag_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-2_part-mag_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-2_part-phase_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-2_part-phase_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-3_part-mag_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-3_part-mag_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-3_part-phase_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-3_part-phase_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-4_part-mag_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-4_part-mag_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_echo-4_part-phase_MEGRE.json
+        │   ├── sub-1_ses-0p64_run-1_echo-4_part-phase_MEGRE.nii
+        │   ├── sub-1_ses-0p64_run-1_T1w.json
+        │   └── sub-1_ses-0p64_run-1_T1w.nii
+        └── extra_data
+            ├── sub-1_ses-0p64_run-1_chi.nii
+            ├── sub-1_ses-0p64_run-1_mask.nii
+            └── sub-1_ses-0p64_run-1_segmentation.nii
+```
+
+Some repesentative images including the T2starw and T1w magnitude images:
+
+![Image](https://i.imgur.com/RVzdhRz.png)
 
