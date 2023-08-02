@@ -126,6 +126,10 @@ class ReconParams:
         Peak signal-to-noise ratio.
     random_seed : int
         Random seed to use for noise.
+    weighting_suffix : string
+        The BIDS-compliant suffix that defines the weighting of the images (e.g. T1w, T2starw, PD).
+    export_phase : bool
+        Boolean to control whether phase images are exported.
     """
 
     def __init__(
