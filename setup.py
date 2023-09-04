@@ -2,9 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name='qsm-forward',
-    version='0.15',
+    version='0.16',
     packages=find_packages(),
-    url='https://github.com/astewartau/qsm-forward-model',
+    url='https://github.com/astewartau/qsm-forward',
     author='Ashley Stewart',
     author_email='a.stewart.au@gmail.com',
     description='A forward-model simulation for Quantitative Susceptibility Mapping',
