@@ -16,14 +16,13 @@ import qsm_forward
 import numpy as np
 
 if __name__ == "__main__":
-    tissue_params = qsm_forward.TissueParams("../head-phantom-maps", apply_mask=False)
+    tissue_params = qsm_forward.TissueParams("~/head-phantom-maps", chi="ChiModelMIX.nii.gz")
     
     recon_params_all = [
-        qsm_forward.ReconParams(voxel_size=voxel_size, peak_snr=100, session=session)
-        for (voxel_size, session) in [
-            (np.array([0.8, 0.8, 0.8]), "0p8"),
-            (np.array([1.0, 1.0, 1.0]), "1p0"),
-            (np.array([1.2, 1.2, 1.2]), "1p2")
+        qsm_forward.ReconParams(voxel_size=voxel_size, TEs=TEs, TR=TR, flip_angle=flip_angle, suffix=suffix, export_phase=export_phase)
+        for (voxel_size, TEs, TR, flip_angle, suffix, export_phase) in [
+            (np.array([1.0, 1.0, 1.0]), np.array([0.004, 0.012, 0.02, 0.028]), 0.05, 15, "T2starw", True),
+            (np.array([1.0, 1.0, 1.0]), np.array([0.0035]), 0.0075, 40, "T1w", False)
         ]
     ]
 

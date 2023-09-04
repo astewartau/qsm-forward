@@ -102,6 +102,8 @@ class ReconParams:
         The ID of the subject.
     session : str
         The ID of the session.
+    acq : str
+        The acquisition name.
     run : int
         The run number.
     TR : float
@@ -126,7 +128,7 @@ class ReconParams:
         Peak signal-to-noise ratio.
     random_seed : int
         Random seed to use for noise.
-    weighting_suffix : string
+    suffix : string
         The BIDS-compliant suffix that defines the weighting of the images (e.g. T1w, T2starw, PD).
     export_phase : bool
         Boolean to control whether phase images are exported.
@@ -135,8 +137,9 @@ class ReconParams:
     def __init__(
             self,
             subject="1",
-            session="1",
-            run="1",
+            session=None,
+            acq=None,
+            run=None,
             TR=50e-3,
             TEs=np.array([ 4e-3, 12e-3, 20e-3, 28e-3 ]),
             flip_angle=15,
@@ -148,11 +151,12 @@ class ReconParams:
             voxel_size=np.array([1.0, 1.0, 1.0]),
             peak_snr=np.inf,
             random_seed=None,
-            weighting_suffix="T2starw",
+            suffix="T2starw",
             export_phase=True
         ):
         self.subject = subject
         self.session = session
+        self.acq = acq
         self.run = run
         self.TR = TR
         self.TEs = TEs
@@ -165,7 +169,7 @@ class ReconParams:
         self.voxel_size = voxel_size
         self.peak_snr = peak_snr
         self.random_seed = random_seed
-        self.weighting_suffix = weighting_suffix
+        self.suffix = suffix
         self.export_phase = export_phase
 
 def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False):
@@ -209,10 +213,21 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     os.makedirs(bids_dir, exist_ok=True)
     
     # recon name
-    recon_name = f"sub-{recon_params.subject}_ses-{recon_params.session}_run-{recon_params.run}"
-    session_dir = os.path.join(bids_dir, f"sub-{recon_params.subject}", f"ses-{recon_params.session}")
-    os.makedirs(os.path.join(session_dir, 'anat'), exist_ok=True)
-    os.makedirs(os.path.join(session_dir, 'extra_data'), exist_ok=True)
+    recon_name = f"sub-{recon_params.subject}"
+    if recon_params.session: recon_name += f"_ses-{recon_params.session}"
+    if recon_params.acq: recon_name += f"_acq-{recon_params.acq}"
+    if recon_params.run: recon_name += f"_run-{recon_params.run}"
+
+    # subject directory
+    subject_dir = os.path.join(bids_dir, f"sub-{recon_params.subject}")
+    if recon_params.session: subject_dir = os.path.join(subject_dir, f"ses-{recon_params.session}")
+
+    # derivatives directory
+    subject_dir_deriv = os.path.join(bids_dir, "derivatives", "qsm-forward", f"sub-{recon_params.subject}")
+    if recon_params.session: subject_dir_deriv = os.path.join(subject_dir_deriv, f"ses-{recon_params.session}")
+
+    os.makedirs(os.path.join(subject_dir, 'anat'), exist_ok=True)
+    os.makedirs(os.path.join(subject_dir_deriv, 'anat'), exist_ok=True)
 
     # random number generator for noise etc.
     rng = np.random.default_rng(recon_params.random_seed)
@@ -220,29 +235,29 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     # image-space resizing
     print("Image-space resizing of chi...")
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
-    if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(session_dir, "extra_data", f"{recon_name}_chi.nii"))
+    if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap.nii"))
     print("Image-space cropping of mask...")
-    if save_mask: nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_mask.nii"))
+    if save_mask: nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
     print("Image-space cropping of segmentation...")
-    if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_segmentation.nii"))
+    if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
 
     # calculate field
     print("Computing field model...")
     field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
-    if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field.nii"))
+    if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
 
     # simulate shim field
     if recon_params.generate_shim_field:
         print("Computing shim fields...")
         _, field, _ = generate_shimmed_field(field, tissue_params.mask.get_fdata(), order=2)
-        if save_shimmed_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field-shimmed.nii"))
+        if save_shimmed_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed_fieldmap.nii"))
 
     # phase offset
     phase_offset = recon_params.phase_offset
     if recon_params.generate_phase_offset:
         print("Computing phase offset...")
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
-        if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(session_dir, "extra_data", f"{recon_name}_field-shimmed-offset.nii"))
+        if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
@@ -274,10 +289,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         del sigHR_cropped
 
         # save nifti images
-        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.weighting_suffix}")
-        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.weighting_suffix}")
-        nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(session_dir, "anat", f"{mag_filename}.nii"))
-        if recon_params.export_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(session_dir, "anat", f"{phs_filename}.nii"))
+        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.suffix}")
+        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.suffix}")
+        nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
+        if recon_params.export_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
 
         # json header
         print(f"Creating JSON headers...")
@@ -285,7 +300,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             'EchoTime': recon_params.TEs[i],
             'MagneticFieldStrength': recon_params.B0,
             'EchoNumber': i+1,
-            'ProtocolName': recon_params.weighting_suffix,
+            'ProtocolName': recon_params.suffix,
             'ConversionSoftware': 'qsm-forward',
             'RepetitionTime': recon_params.TR,
             'FlipAngle': recon_params.flip_angle,
@@ -301,10 +316,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         json_dict_mag = json_dict.copy()
         json_dict_mag['ImageType'] = ['M', 'MAGNITUDE']
 
-        with open(os.path.join(session_dir, "anat", f"{mag_filename}.json"), 'w') as mag_json_file:
+        with open(os.path.join(subject_dir, "anat", f"{mag_filename}.json"), 'w') as mag_json_file:
             json.dump(json_dict_mag, mag_json_file)
         if recon_params.export_phase:
-            with open(os.path.join(session_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
+            with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
 
     print("Done!")
