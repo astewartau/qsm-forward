@@ -226,3 +226,11 @@ Some repesentative images including the T2starw and T1w magnitude images:
 
 ![Image](https://i.imgur.com/RVzdhRz.png)
 
+## Example simulating oblique acquisition
+
+In this [example](qsm_forward/examples/simulated_sources_oblique.py), we simulated spherical susceptibility sources to generate a BIDS directory with a range of B0 directions:
+
+![Image](https://i.imgur.com/8GDsqiN.png)
+
+On the left is the phase image with the two sources with an axial B0 direction. On the right is a phase image with the two sources with a B0 direction rotated 30 degrees about the x axis.
+

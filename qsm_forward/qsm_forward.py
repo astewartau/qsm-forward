@@ -3,7 +3,6 @@ Author: Ashley Stewart <a.stewart.au@gmail.com>
 
 """
 
-import numpy as np
 from dipy.denoise.gibbs import gibbs_removal
 from nilearn.image import resample_img
 
@@ -52,6 +51,16 @@ class TissueParams:
         self._mask = os.path.join(root_dir, mask) if isinstance(mask, str) and os.path.exists(os.path.join(root_dir, mask)) else mask if not isinstance(mask, str) else None
         self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
         self._apply_mask = apply_mask
+        self._affine = None
+
+    def set_affine(self, affine):
+        self._affine = affine
+
+    def _load(self, nii_path):
+        nii = nib.load(nii_path)
+        if self._affine is not None:
+            nii = nib.Nifti1Image(dataobj=nii.get_fdata(), affine=self._affine, header=nii.header)
+        return nii
 
     @property
     def voxel_size(self):
@@ -61,35 +70,38 @@ class TissueParams:
     @property
     def nii_header(self):
         if isinstance(self._chi, str):
-            return nib.load(self._chi).header
+            return self._load(self._chi).header
         header = nib.Nifti1Header()
+        header.set_data_shape(self._chi.shape)
         return header
     
     @property
     def nii_affine(self):
+        if self._affine is not None:
+            return self._affine
         if isinstance(self._chi, str):
-            return nib.load(self._chi).affine
+            return self._load(self._chi).affine
         return np.eye(4)
 
-    def _do_apply_mask(self, nii): return nib.Nifti1Image(dataobj=nii.get_fdata() * self.mask.get_fdata(), affine=nii.affine, header=nii.header) if self._apply_mask else nii
+    def _do_apply_mask(self, nii): return nib.Nifti1Image(dataobj=nii.get_fdata() * self.mask.get_fdata(), affine=self.nii_affine, header=nii.header) if self._apply_mask else nii
 
     @property
-    def chi(self): return self._do_apply_mask(nib.load(self._chi) if isinstance(self._chi, str) else nib.Nifti1Image(self._chi, affine=self.nii_affine, header=self.nii_header))
+    def chi(self): return self._do_apply_mask(self._load(self._chi) if isinstance(self._chi, str) else nib.Nifti1Image(self._chi, affine=self.nii_affine, header=self.nii_header))
 
     @property
-    def mask(self): return nib.load(self._mask) if isinstance(self._mask, str) else nib.Nifti1Image(self._mask or np.array(self._chi != 0), affine=self.nii_affine, header=self.nii_header)
+    def mask(self): return self._load(self._mask) if isinstance(self._mask, str) else nib.Nifti1Image(self._mask or np.array(self._chi != 0), affine=self.nii_affine, header=self.nii_header)
 
     @property
-    def M0(self): return self._do_apply_mask(nib.load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
+    def M0(self): return self._do_apply_mask(self._load(self._M0) if isinstance(self._M0, str) else nib.Nifti1Image(self._M0 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
 
     @property
-    def R1(self): return self._do_apply_mask(nib.load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
+    def R1(self): return self._do_apply_mask(self._load(self._R1) if isinstance(self._R1, str) else nib.Nifti1Image(self._R1 or np.array(self.mask.get_fdata() * 1), affine=self.nii_affine, header=self.nii_header))
     
     @property
-    def R2star(self): return self._do_apply_mask(nib.load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.array(self.mask.get_fdata() * 50), affine=self.nii_affine, header=self.nii_header))
+    def R2star(self): return self._do_apply_mask(self._load(self._R2star) if isinstance(self._R2star, str) else nib.Nifti1Image(self._R2star or np.array(self.mask.get_fdata() * 50), affine=self.nii_affine, header=self.nii_header))
     
     @property
-    def seg(self): return nib.load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
+    def seg(self): return self._load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
     
 
 class ReconParams:
@@ -172,6 +184,27 @@ class ReconParams:
         self.suffix = suffix
         self.export_phase = export_phase
 
+def rotation_matrix_from_vectors(vec1, vec2):
+    """ Compute the rotation matrix that aligns vec1 to vec2 """
+    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+    s = np.linalg.norm(v)
+    
+    # Check if vectors are nearly parallel
+    if np.isclose(s, 0):
+        return np.eye(3)
+    
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    
+    return rotation_matrix
+
+def adjust_affine_for_B0_direction(affine, B0_dir):
+    B0_dir_normalized = B0_dir / np.linalg.norm(B0_dir)
+    rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
+    return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
+
 def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
@@ -232,6 +265,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     # random number generator for noise etc.
     rng = np.random.default_rng(recon_params.random_seed)
 
+    # adjust affine for B0 direction
+    affine = adjust_affine_for_B0_direction(tissue_params.nii_affine.copy(), recon_params.B0_dir)
+    tissue_params.set_affine(affine)
+
     # image-space resizing
     print("Image-space resizing of chi...")
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
@@ -289,8 +326,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         del sigHR_cropped
 
         # save nifti images
-        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.suffix}")
-        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.export_phase else "") + ("_MEGRE" if multiecho else f"_{recon_params.suffix}")
+        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.export_phase else "") + f"_{recon_params.suffix}"
+        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.export_phase else "") + f"_{recon_params.suffix}"
         nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
         if recon_params.export_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
 
@@ -540,11 +577,22 @@ def resize(nii, voxel_size, interpolation='continuous'):
     if np.array_equal(original_shape, target_shape):
         return nii
 
-    target_affine = np.diag(list(voxel_size) + [1])
+    # Compute the new affine based purely on resizing, without rotation
+    scale_factor = np.divide(target_shape, original_shape)
+    resize_affine = np.eye(4)
+    for i in range(3):
+        resize_affine[i, i] = 1 / scale_factor[i]
     
+    # Compute the new affine
+    new_affine = np.dot(resize_affine, nii.affine)
+    
+    # Adjust the voxel sizes in the new affine
+    for i in range(3):
+        new_affine[i, i] *= voxel_size[i]
+
     return resample_img(
         nii,
-        target_affine=target_affine,
+        target_affine=new_affine,
         target_shape=target_shape,
         interpolation=interpolation
     )
