@@ -10,44 +10,74 @@ def main():
         description='Simulate magnitude and phase'
     )
 
+    # Create subcommands
+    subparsers = parser.add_subparsers(dest='mode')
+    headphantom_parser = subparsers.add_parser('head', help='Use head phantom maps for simulation')
+    simplephantom_parser = subparsers.add_parser('simple', help='Generate simple susceptibility sources for simulation')
+
     def argparse_bool(user_in):
         if user_in is None: return None
         if isinstance(user_in, bool): return user_in
         user_in = user_in.strip().lower()
         if user_in in ['on', 'true', 'yes']: return True
         if user_in in ['off', 'false', 'no']: return False
-        raise ValueError(f"Invalid boolean value {user_in}; use on/yes/true or off/false/no")
+        raise ValueError(f"Invalid boolean value {user_in}; use on/yes/true or off/false/no")# Arguments specific to phantom simulation
     
-    parser.add_argument('bids', help='Output BIDS directory')
-    parser.add_argument('--maps', default=None, help='Head phantom maps directory')
-    parser.add_argument('--subject', default='1')
-    parser.add_argument('--session', default=None),
-    parser.add_argument('--acq', default=None),
-    parser.add_argument('--run', default=None),
-    parser.add_argument('--TR', default=50e-3, type=float),
-    parser.add_argument('--TEs', default=[ 4e-3, 12e-3, 20e-3, 28e-3 ], type=float, nargs='+')
-    parser.add_argument('--flip_angle', default=15)
-    parser.add_argument('--B0', default=7, type=float)
-    parser.add_argument('--B0-dir', default=[0., 0., 1.], type=float, nargs=3)
-    parser.add_argument('--generate-phase-offset', nargs='?', type=argparse_bool, const=True, default=True)
-    parser.add_argument('--generate-shim-field', nargs='?', type=argparse_bool, const=True, default=True)
-    parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
-    parser.add_argument('--peak-snr', default=np.inf, type=float)
-    parser.add_argument('--random-seed', default=None, type=int)
-    parser.add_argument('--save-chi', nargs='?', type=argparse_bool, const=True, default=True)
-    parser.add_argument('--save-mask', nargs='?', type=argparse_bool, const=True, default=True)
-    parser.add_argument('--save-segmentation', nargs='?', type=argparse_bool, const=True, default=True)
-    parser.add_argument('--save-field', nargs='?', type=argparse_bool, const=False, default=False)
-    parser.add_argument('--save-shimmed-field', nargs='?', type=argparse_bool, const=False, default=False)
-    parser.add_argument('--save-shimmed-offset-field', nargs='?', type=argparse_bool, const=False, default=False)
+    headphantom_parser.add_argument('maps', help='Head phantom maps directory')
+    
+    # Arguments common to both subcommands
+    for sub_parser in [headphantom_parser, simplephantom_parser]:
+        # Add the common arguments here e.g. 
+        sub_parser.add_argument('bids', help='Output BIDS directory')
+        sub_parser.add_argument('--subject', default='1')
+        sub_parser.add_argument('--session', default=None),
+        sub_parser.add_argument('--acq', default=None),
+        sub_parser.add_argument('--run', default=None),
+        sub_parser.add_argument('--TR', default=50e-3, type=float),
+        sub_parser.add_argument('--TEs', default=[ 4e-3, 12e-3, 20e-3, 28e-3 ], type=float, nargs='+')
+        sub_parser.add_argument('--flip_angle', default=15)
+        sub_parser.add_argument('--B0', default=7, type=float)
+        sub_parser.add_argument('--B0-dir', default=[0., 0., 1.], type=float, nargs=3)
+        sub_parser.add_argument('--generate-phase-offset', nargs='?', type=argparse_bool, const=True, default=True)
+        sub_parser.add_argument('--generate-shim-field', nargs='?', type=argparse_bool, const=True, default=True)
+        sub_parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
+        sub_parser.add_argument('--peak-snr', default=np.inf, type=float)
+        sub_parser.add_argument('--random-seed', default=None, type=int)
+        sub_parser.add_argument('--save-chi', nargs='?', type=argparse_bool, const=True, default=True)
+        sub_parser.add_argument('--save-mask', nargs='?', type=argparse_bool, const=True, default=True)
+        sub_parser.add_argument('--save-segmentation', nargs='?', type=argparse_bool, const=True, default=True)
+        sub_parser.add_argument('--save-field', nargs='?', type=argparse_bool, const=False, default=False)
+        sub_parser.add_argument('--save-shimmed-field', nargs='?', type=argparse_bool, const=False, default=False)
+        sub_parser.add_argument('--save-shimmed-offset-field', nargs='?', type=argparse_bool, const=False, default=False)
+
+    # Arguments specific to susceptibility sources simulation
+    simplephantom_parser.add_argument('--resolution', default=[100, 100, 100], type=int, nargs=3)
+    simplephantom_parser.add_argument('--background', default=0, type=float)
+    simplephantom_parser.add_argument('--large-cylinder-val', default=0.005, type=float)
+    simplephantom_parser.add_argument('--small-cylinder-radii', default=[4, 4, 4, 7], type=float, nargs='+')
+    simplephantom_parser.add_argument('--small-cylinder-vals', default=[0.05, 0.1, 0.2, 0.5], type=float, nargs='+')
 
     args = parser.parse_args()
 
-    if args.maps is not None:
+    if args.mode == 'head':
         tissue_params = qsm_forward.TissueParams(args.maps)
+
+    elif args.mode == 'simple':
+        tissue_params = qsm_forward.TissueParams(
+            chi=qsm_forward.generate_susceptibility_phantom(
+                resolution=args.resolution,
+                background=args.background,
+                large_cylinder_val=args.large_cylinder_val,
+                small_cylinder_radii=args.small_cylinder_radii,
+                small_cylinder_vals=args.small_cylinder_vals
+            )
+        )
+
     else:
-        tissue_params = qsm_forward.TissueParams(chi=qsm_forward.simulate_susceptibility_sources())
-    
+        parser.print_help()
+        return
+
+    # Common code to run for both modes
     recon_params = qsm_forward.ReconParams(
         subject=args.subject,
         session=args.session,
