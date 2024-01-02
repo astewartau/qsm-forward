@@ -1,5 +1,5 @@
 dist/
-head-phantom-maps/
+data/
 qsm_forward.egg-info/
 *.nii*
 *__pycache__*

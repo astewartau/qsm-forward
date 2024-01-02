@@ -75,14 +75,14 @@ Some repesentative images including the mask, first and last-echo phase image, a
 
 ## Example using head phantom data
 
-In this example, we generate a BIDS-compliant dataset based on head phantom maps. You must provide these maps yourself by gaining access to the QSM Challenge 2.0 head phantom data or generating your own realistic maps:
+In this example, we generate a BIDS-compliant dataset based on the [realistic in-silico head phantom](https://doi.org/10.34973/m20r-jt17). If you have access to the head phantom, you need to retain the `data` directory which provides relevant tissue parameters:
 
 ```python
 import qsm_forward
 import numpy as np
 
 if __name__ == "__main__":
-    tissue_params = qsm_forward.TissueParams("../head-phantom-maps")
+    tissue_params = qsm_forward.TissueParams(root_dir="~/data")
     
     recon_params_all = [
         qsm_forward.ReconParams(voxel_size=voxel_size, peak_snr=100, session=session)
@@ -179,7 +179,7 @@ import qsm_forward
 import numpy as np
 
 if __name__ == "__main__":
-    tissue_params = qsm_forward.TissueParams("../head-phantom-maps", chi="ChiModelMIX.nii.gz")
+    tissue_params = qsm_forward.TissueParams(root_dir="~/data", chi="ChiModelMIX.nii.gz")
     
     recon_params_all = [
         qsm_forward.ReconParams(voxel_size=voxel_size, session=session, TEs=TEs, TR=TR, flip_angle=flip_angle, suffix=suffix, export_phase=export_phase)

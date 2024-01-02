@@ -12,7 +12,7 @@ def main():
 
     # Create subcommands
     subparsers = parser.add_subparsers(dest='mode')
-    headphantom_parser = subparsers.add_parser('head', help='Use head phantom maps for simulation')
+    headphantom_parser = subparsers.add_parser('head', help='Use realistic in-silico head phantom for simulation')
     simplephantom_parser = subparsers.add_parser('simple', help='Generate simple susceptibility sources for simulation')
 
     def argparse_bool(user_in):
@@ -23,7 +23,7 @@ def main():
         if user_in in ['off', 'false', 'no']: return False
         raise ValueError(f"Invalid boolean value {user_in}; use on/yes/true or off/false/no")# Arguments specific to phantom simulation
     
-    headphantom_parser.add_argument('maps', help='Head phantom maps directory')
+    headphantom_parser.add_argument('data', help='Head phantom data directory (download from https://doi.org/10.34973/m20r-jt17)')
     
     # Arguments common to both subcommands
     for sub_parser in [headphantom_parser, simplephantom_parser]:
@@ -60,7 +60,7 @@ def main():
     args = parser.parse_args()
 
     if args.mode == 'head':
-        tissue_params = qsm_forward.TissueParams(args.maps)
+        tissue_params = qsm_forward.TissueParams(args.data)
 
     elif args.mode == 'simple':
         tissue_params = qsm_forward.TissueParams(

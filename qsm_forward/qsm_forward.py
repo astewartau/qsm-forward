@@ -17,6 +17,8 @@ class TissueParams:
 
     Attributes
     ----------
+    root_dir : str or None
+        The path to the root directory containing the tissue parameter files.
     chi_path : str or ndarray
         The path to the Chi file or a 3D numpy array containing Chi values.
     M0_path : str or ndarray
@@ -34,12 +36,12 @@ class TissueParams:
     def __init__(
             self,
             root_dir = "",
-            chi = "ChiModelMIX_noCalc.nii.gz",
-            M0 = "M0.nii.gz",
-            R1 = "R1.nii.gz",
-            R2star = "R2star.nii.gz",
-            mask = "BrainMask.nii.gz",
-            seg = "SegmentedModel.nii.gz",
+            chi = "chimodel/ChiModelMIX.nii",
+            M0 = "maps/M0.nii.gz",
+            R1 = "maps/R1.nii.gz",
+            R2star = "maps/R2star.nii.gz",
+            mask = "masks/BrainMask.nii.gz",
+            seg = "masks/SegmentedModel.nii.gz",
             apply_mask = False
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):

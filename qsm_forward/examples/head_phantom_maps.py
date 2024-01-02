@@ -7,7 +7,8 @@ from MRI simulations.
 The simulations are carried out with various reconstruction parameters 
 (which include different voxel sizes), and the results are saved in the "bids" directory.
 
-The tissue parameters are loaded from the directory "../head-phantom-maps".
+The tissue parameters are loaded from the directory "../data". The data directory can
+be downloaded from https://doi.org/10.34973/m20r-jt17.
 
 Author: Ashley Stewart (a.stewart.au@gmail.com)
 """
@@ -16,7 +17,7 @@ import qsm_forward
 import numpy as np
 
 if __name__ == "__main__":
-    tissue_params = qsm_forward.TissueParams("~/head-phantom-maps", chi="ChiModelMIX.nii.gz")
+    tissue_params = qsm_forward.TissueParams(root_dir="~/data")
     
     recon_params_all = [
         qsm_forward.ReconParams(voxel_size=voxel_size, TEs=TEs, TR=TR, flip_angle=flip_angle, suffix=suffix, export_phase=export_phase)
