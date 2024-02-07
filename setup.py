@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='qsm-forward',
-    version='0.19',
+    version='0.20',
     packages=find_packages(),
     url='https://github.com/astewartau/qsm-forward',
     author='Ashley Stewart',

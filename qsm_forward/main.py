@@ -35,14 +35,16 @@ def main():
         sub_parser.add_argument('--run', default=None),
         sub_parser.add_argument('--TR', default=50e-3, type=float),
         sub_parser.add_argument('--TEs', default=[ 4e-3, 12e-3, 20e-3, 28e-3 ], type=float, nargs='+')
-        sub_parser.add_argument('--flip_angle', default=15)
+        sub_parser.add_argument('--flip_angle', default=15, type=float)
         sub_parser.add_argument('--B0', default=7, type=float)
         sub_parser.add_argument('--B0-dir', default=[0., 0., 1.], type=float, nargs=3)
+        sub_parser.add_argument('--suffix', default='MEGRE')
         sub_parser.add_argument('--generate-phase-offset', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--generate-shim-field', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
         sub_parser.add_argument('--peak-snr', default=np.inf, type=float)
         sub_parser.add_argument('--random-seed', default=None, type=int)
+        sub_parser.add_argument('--save-phase', nargs='?', type=argparse_bool, const=True, default=None)
         sub_parser.add_argument('--save-chi', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-mask', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-segmentation', nargs='?', type=argparse_bool, const=True, default=True)
@@ -93,7 +95,9 @@ def main():
         generate_shim_field=True,
         voxel_size=np.array(args.voxel_size),
         peak_snr=args.peak_snr,
-        random_seed=args.random_seed
+        random_seed=args.random_seed,
+        save_phase=args.save_phase,
+        suffix=args.suffix
     )
 
     qsm_forward.generate_bids(

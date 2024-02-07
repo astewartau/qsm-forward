@@ -144,8 +144,8 @@ class ReconParams:
         Random seed to use for noise.
     suffix : string
         The BIDS-compliant suffix that defines the weighting of the images (e.g. T1w, T2starw, PD).
-    export_phase : bool
-        Boolean to control whether phase images are exported.
+    save_phase : bool
+        Boolean to control whether phase images are saved.
     """
 
     def __init__(
@@ -166,7 +166,7 @@ class ReconParams:
             peak_snr=np.inf,
             random_seed=None,
             suffix="T2starw",
-            export_phase=True
+            save_phase=True
         ):
         self.subject = subject
         self.session = session
@@ -184,7 +184,7 @@ class ReconParams:
         self.peak_snr = peak_snr
         self.random_seed = random_seed
         self.suffix = suffix
-        self.export_phase = export_phase
+        self.save_phase = save_phase
 
 def rotation_matrix_from_vectors(vec1, vec2):
     """ Compute the rotation matrix that aligns vec1 to vec2 """
@@ -328,10 +328,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         del sigHR_cropped
 
         # save nifti images
-        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.export_phase else "") + f"_{recon_params.suffix}"
-        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.export_phase else "") + f"_{recon_params.suffix}"
+        mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.save_phase else "") + f"_{recon_params.suffix}"
+        phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.save_phase else "") + f"_{recon_params.suffix}"
         nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
-        if recon_params.export_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
+        if recon_params.save_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
 
         # json header
         print(f"Creating JSON headers...")
@@ -357,7 +357,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
         with open(os.path.join(subject_dir, "anat", f"{mag_filename}.json"), 'w') as mag_json_file:
             json.dump(json_dict_mag, mag_json_file)
-        if recon_params.export_phase:
+        if recon_params.save_phase:
             with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
 
