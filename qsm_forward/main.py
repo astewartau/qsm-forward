@@ -44,7 +44,7 @@ def main():
         sub_parser.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
         sub_parser.add_argument('--peak-snr', default=np.inf, type=float)
         sub_parser.add_argument('--random-seed', default=None, type=int)
-        sub_parser.add_argument('--save-phase', nargs='?', type=argparse_bool, const=True, default=None)
+        sub_parser.add_argument('--save-phase', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-chi', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-mask', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-segmentation', nargs='?', type=argparse_bool, const=True, default=True)
