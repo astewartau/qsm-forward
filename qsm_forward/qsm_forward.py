@@ -574,23 +574,23 @@ def resize(nii, voxel_size, interpolation='continuous'):
 
     """
     original_shape = np.array(nii.header.get_data_shape())
-    target_shape = np.array(np.round((np.array(nii.header.get_zooms()) / voxel_size) * np.array(nii.header.get_data_shape())), dtype=int)
+    target_shape = np.array(np.round((np.array(nii.header.get_zooms()) / voxel_size) * original_shape), dtype=int)
 
     if np.array_equal(original_shape, target_shape):
         return nii
 
-    # Compute the new affine based purely on resizing, without rotation
-    scale_factor = np.divide(target_shape, original_shape)
-    resize_affine = np.eye(4)
+    # Create a new affine matrix that directly sets the diagonal to the new voxel sizes
+    new_affine = np.eye(4)
+    new_affine[:3, :3] = nii.affine[:3, :3]
+    scale_factors = np.divide(nii.header.get_zooms(), voxel_size)
     for i in range(3):
-        resize_affine[i, i] = 1 / scale_factor[i]
-    
-    # Compute the new affine
-    new_affine = np.dot(resize_affine, nii.affine)
-    
+        new_affine[i, i] = nii.affine[i, i] / scale_factors[i]
+
+    new_affine[:3, 3] = nii.affine[:3, 3]
+
     # Adjust the voxel sizes in the new affine
     for i in range(3):
-        new_affine[i, i] *= voxel_size[i]
+        new_affine[i, i] = voxel_size[i] * (nii.affine[i, i] / nii.header.get_zooms()[i])
 
     return resample_img(
         nii,
