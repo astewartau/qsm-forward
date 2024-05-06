@@ -10,6 +10,40 @@ import json
 import os
 import nibabel as nib
 import numpy as np
+import pkg_resources
+import site
+import datetime
+
+
+def is_editable_package(package_name):
+    """
+    Determine if a package was installed in "editable" mode.
+    
+    :param package_name: The name of the package.
+    :return: True if the package was installed in editable mode, False otherwise.
+    """
+    
+    # Get the site-packages directory
+    site_packages = site.getsitepackages()[0]
+    
+    # Look for the package's metadata directory
+    for item in os.listdir(site_packages):
+        if item.startswith(package_name) and item.endswith(".egg-link"):
+            return True
+        if item.startswith(package_name) and item.endswith(".dist-info"):
+            dist_info_dir = os.path.join(site_packages, item)
+            direct_url_path = os.path.join(dist_info_dir, "direct_url.json")
+            
+            # If direct_url.json exists, parse it and check for "editable"
+            if os.path.exists(direct_url_path):
+                with open(direct_url_path, 'r') as f:
+                    data = json.load(f)
+                    return data.get("editable", False)
+    
+    return False
+
+def get_version():
+    return f"{pkg_resources.get_distribution('qsm-forward').version}" + (" (linked installation)" if is_editable_package('qsm-forward') else "")
 
 class TissueParams:
     """
@@ -361,6 +395,32 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
 
+    print(f"Generating details for BIDS datset_description.json...")
+    dataset_description = {
+        "Name" : f"qsm-forward BIDS ({datetime.date.today()})",
+        "BIDSVersion" : "1.9.0",
+        "GeneratedBy" : [{
+            "Name" : "qsm-forward",
+            "Version": f"{get_version()}",
+            "CodeURL" : "https://github.com/astewartau/qsm-forward"
+        }],
+        "Authors" : ["ADD AUTHORS HERE"]
+    }
+    print(f"Writing BIDS dataset_description.json...")
+    with open(os.path.join(bids_dir, 'dataset_description.json'), 'w', encoding='utf-8') as dataset_json_file:
+        json.dump(dataset_description, dataset_json_file)
+    with open(os.path.join(bids_dir, 'derivatives', 'qsm-forward', 'dataset_description.json'), 'w', encoding='utf-8') as dataset_json_file:
+        json.dump(dataset_description, dataset_json_file)
+
+    print(f"Writing BIDS .bidsignore file...")
+    with open(os.path.join(bids_dir, '.bidsignore'), 'w', encoding='utf-8') as bidsignore_file:
+        bidsignore_file.write('')
+
+    print(f"Writing BIDS dataset README...")
+    with open(os.path.join(bids_dir, 'README'), 'w', encoding='utf-8') as readme_file:
+        readme_file.write(f"Generated using qsm-forward ({get_version()})\n")
+        readme_file.write(f"\nDescribe your dataset here.\n")
+    
     print("Done!")
 
 
