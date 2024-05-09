@@ -199,7 +199,7 @@ class ReconParams:
             voxel_size=np.array([1.0, 1.0, 1.0]),
             peak_snr=np.inf,
             random_seed=None,
-            suffix="T2starw",
+            suffix=None,
             save_phase=True
         ):
         self.subject = subject
@@ -217,8 +217,9 @@ class ReconParams:
         self.voxel_size = voxel_size
         self.peak_snr = peak_snr
         self.random_seed = random_seed
-        self.suffix = suffix
         self.save_phase = save_phase
+        if suffix is None:
+            self.suffix = "MEGRE" if len(TEs) > 1 else "T2starw"            
 
 def rotation_matrix_from_vectors(vec1, vec2):
     """ Compute the rotation matrix that aligns vec1 to vec2 """
