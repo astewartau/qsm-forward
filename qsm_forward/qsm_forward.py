@@ -309,7 +309,6 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     # image-space resizing
     print("Image-space resizing of chi...")
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
-    print('chi_downsampled_nii shape:\n', chi_downsampled_nii.affine)
     if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap.nii"))
     print("Image-space cropping of mask...")
     if save_mask: nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
