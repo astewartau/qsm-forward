@@ -218,6 +218,7 @@ class ReconParams:
         self.peak_snr = peak_snr
         self.random_seed = random_seed
         self.save_phase = save_phase
+        self.suffix = suffix
         if suffix is None:
             self.suffix = "MEGRE" if len(TEs) > 1 else "T2starw"            
 
