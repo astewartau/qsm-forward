@@ -76,6 +76,7 @@ class TissueParams:
             R2star = "maps/R2star.nii.gz",
             mask = "masks/BrainMask.nii.gz",
             seg = "masks/SegmentedModel.nii.gz",
+            voxel_size = None,
             apply_mask = False
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
@@ -87,6 +88,7 @@ class TissueParams:
         self._mask = os.path.join(root_dir, mask) if isinstance(mask, str) and os.path.exists(os.path.join(root_dir, mask)) else mask if not isinstance(mask, str) else None
         self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
         self._apply_mask = apply_mask
+        self._voxel_size = voxel_size
         self._affine = None
 
     def set_affine(self, affine):
@@ -100,6 +102,8 @@ class TissueParams:
 
     @property
     def voxel_size(self):
+        if self._voxel_size is not None:
+            return self._voxel_size
         zooms = self.nii_header.get_zooms()
         return zooms if len(zooms) == 3 else np.array([zooms[0] for i in range(3)])
 
@@ -312,7 +316,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
     if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap.nii"))
     print("Image-space cropping of mask...")
-    if save_mask: nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
+    if save_mask:
+        nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
     print("Image-space cropping of segmentation...")
     if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
 
@@ -641,6 +646,9 @@ def resize(nii, voxel_size, interpolation='continuous'):
         The resized Nifti image.
 
     """
+    # Store the original dtype
+    original_dtype = nii.get_data_dtype()
+
     original_shape = np.array(nii.header.get_data_shape())
     target_shape = np.array(np.round((np.array(nii.header.get_zooms()) / voxel_size) * original_shape), dtype=int)
 
@@ -656,12 +664,23 @@ def resize(nii, voxel_size, interpolation='continuous'):
     for i in range(3):
         new_affine[i, i] = nii.affine[i, i] / scale_factors[i]
 
-    return resample_img(
+    # If using nearest interpolation (binary mask), cast the data to float32 to avoid casting issues
+    if interpolation == 'nearest':
+        nii = nib.Nifti1Image(nii.get_fdata().astype(np.float32), nii.affine, nii.header)
+
+    # Resample the image
+    resampled_nii = resample_img(
         nii,
         target_affine=new_affine,
         target_shape=target_shape,
         interpolation=interpolation
     )
+
+    # Cast back to the original dtype
+    resampled_data = resampled_nii.get_fdata().astype(original_dtype)
+    resampled_nii = nib.Nifti1Image(resampled_data, resampled_nii.affine, resampled_nii.header)
+
+    return resampled_nii
 
 
 def crop_imagespace(x, shape):
