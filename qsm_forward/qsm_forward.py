@@ -361,7 +361,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
         # noise
         print(f"Simulating noise for echo {i+1}...")
-        sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
+        if recon_params.random_seed is not None: 
+            print(f'Adding noise with ramdom seed {recon_params.random_seed}...')
+            sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
+        else:
+            sigHR_cropped_noisy = sigHR_cropped
         del sigHR_cropped
 
         # save nifti images
