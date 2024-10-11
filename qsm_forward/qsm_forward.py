@@ -317,6 +317,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     # calculate field
     print("Computing field model...")
+    local_field = generate_field(tissue_params.chi.get_fdata() * tissue_params.mask.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
+    if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(local_field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap_local.nii"))
     field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
     if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
 
