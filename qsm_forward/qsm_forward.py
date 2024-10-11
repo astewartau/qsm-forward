@@ -318,7 +318,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     # calculate field
     print("Computing field model...")
     field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
-    if save_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
+    if save_field:
+        nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
+        local_field = generate_field(tissue_params.chi.get_fdata() * tissue_params.mask.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
+        nib.save(resize(nib.Nifti1Image(dataobj=np.array(local_field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap-local.nii"))
 
     # simulate shim field
     if recon_params.generate_shim_field:
@@ -358,8 +361,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         del sigHR
 
         # noise
-        print(f"Simulating noise for echo {i+1}...")
-        sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
+        if recon_params.random_seed is not None:
+            print(f"Simulating noise for echo {i+1} with random seed {recon_params.random_seed}...")
+            sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
+        else:
+            sigHR_cropped_noisy = np.array(sigHR_cropped)
         del sigHR_cropped
 
         # save nifti images

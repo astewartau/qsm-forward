@@ -28,6 +28,7 @@ if __name__ == "__main__":
     recon_params = qsm_forward.ReconParams()
     recon_params.subject = "simulated-sources"
     recon_params.peak_snr = 100
+    recon_params.random_seed = 42
 
     tissue_params = qsm_forward.TissueParams(
         chi=qsm_forward.generate_susceptibility_phantom(
@@ -85,7 +86,7 @@ if __name__ == "__main__":
     tissue_params = qsm_forward.TissueParams(root_dir="~/data")
     
     recon_params_all = [
-        qsm_forward.ReconParams(voxel_size=voxel_size, peak_snr=100, session=session)
+        qsm_forward.ReconParams(voxel_size=voxel_size, peak_snr=100, random_seed=42, session=session)
         for (voxel_size, session) in [
             (np.array([0.8, 0.8, 0.8]), "0p8"),
             (np.array([1.0, 1.0, 1.0]), "1p0"),
@@ -182,7 +183,7 @@ if __name__ == "__main__":
     tissue_params = qsm_forward.TissueParams(root_dir="~/data", chi="ChiModelMIX.nii.gz")
     
     recon_params_all = [
-        qsm_forward.ReconParams(voxel_size=voxel_size, session=session, TEs=TEs, TR=TR, flip_angle=flip_angle, suffix=suffix, save_phase=save_phase)
+        qsm_forward.ReconParams(voxel_size=voxel_size, session=session, TEs=TEs, TR=TR, flip_angle=flip_angle, random_seed=42, suffix=suffix, save_phase=save_phase)
         for (voxel_size, session, TEs, TR, flip_angle, suffix, save_phase) in [
             (np.array([0.64, 0.64, 0.64]), "0p64", np.array([3.5e-3]), 7.5e-3, 40, "T1w", False),
             (np.array([0.64, 0.64, 0.64]), "0p64", np.array([0.004, 0.012, 0.02, 0.028]), 0.05, 15, "T2starw", True),
