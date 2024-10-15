@@ -377,12 +377,22 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         # save nifti images
         mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.save_phase else "") + f"_{recon_params.suffix}"
         phs_filename = f"{recon_name_i}" + ("_part-phase" if recon_params.save_phase else "") + f"_{recon_params.suffix}"
-        nib.save(nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
-        if recon_params.save_phase: nib.save(nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header), filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
+        description = f"TE={recon_params.TEs[i]}; TR={recon_params.TR}; FlipAngle={recon_params.flip_angle}; B0={recon_params.B0}; B0_dir={recon_params.B0_dir}"
+        mag_nii = nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header)
+        mag_nii.header['descrip'] = description
+        nib.save(mag_nii, filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
+        if recon_params.save_phase:
+            phs_nii = nib.Nifti1Image(dataobj=np.angle(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header)
+            phs_nii.header['descrip'] = description
+            nib.save(phs_nii, filename=os.path.join(subject_dir, "anat", f"{phs_filename}.nii"))
 
         # json header
         print(f"Creating JSON headers...")
-        json_dict = { 
+        json_dict = {
+            'Subject': recon_params.subject,
+            'Session': recon_params.session,
+            'Acquisition': recon_params.acquisition,
+            'Run': recon_params.run,
             'EchoTime': recon_params.TEs[i],
             'MagneticFieldStrength': recon_params.B0,
             'EchoNumber': i+1,
