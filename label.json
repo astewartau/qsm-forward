@@ -1,0 +1,131 @@
+[
+    {
+        "name": "Caudate",
+        "label": "1",
+        "voxel_value": 1,
+        "r": 202,
+        "g": 116,
+        "b": 198
+    },
+    {
+        "name": "Globus pallidus",
+        "label": "2",
+        "voxel_value": 2,
+        "r": 145,
+        "g": 167,
+        "b": 62
+    },
+    {
+        "name": "Putamen",
+        "label": "3",
+        "voxel_value": 3,
+        "r": 106,
+        "g": 112,
+        "b": 215
+    },
+    {
+        "name": "Red nucleus",
+        "label": "4",
+        "voxel_value": 4,
+        "r": 205,
+        "g": 156,
+        "b": 46
+    },
+    {
+        "name": "Dentate nucleus",
+        "label": "5",
+        "voxel_value": 5,
+        "r": 92,
+        "g": 55,
+        "b": 136
+    },
+    {
+        "name": "Substantia nigra & subthalamic nucleus",
+        "label": "6",
+        "voxel_value": 6,
+        "r": 125,
+        "g": 186,
+        "b": 94
+    },
+    {
+        "name": "Thalamus",
+        "label": "7",
+        "voxel_value": 7,
+        "r": 178,
+        "g": 69,
+        "b": 124
+    },
+    {
+        "name": "White matter",
+        "label": "8",
+        "voxel_value": 8,
+        "r": 89,
+        "g": 190,
+        "b": 121
+    },
+    {
+        "name": "Gray matter",
+        "label": "9",
+        "voxel_value": 9,
+        "r": 186,
+        "g": 71,
+        "b": 88
+    },
+    {
+        "name": "CSF",
+        "label": "10",
+        "voxel_value": 10,
+        "r": 67,
+        "g": 200,
+        "b": 172
+    },
+    {
+        "name": "Blood",
+        "label": "11",
+        "voxel_value": 11,
+        "r": 191,
+        "g": 70,
+        "b": 58
+    },
+    {
+        "name": "Fat",
+        "label": "12",
+        "voxel_value": 12,
+        "r": 109,
+        "g": 141,
+        "b": 215
+    },
+    {
+        "name": "Bone",
+        "label": "13",
+        "voxel_value": 13,
+        "r": 189,
+        "g": 151,
+        "b": 64
+    },
+    {
+        "name": "Air",
+        "label": "14",
+        "voxel_value": 14,
+        "r": 73,
+        "g": 115,
+        "b": 39
+    },
+    {
+        "name": "Muscle",
+        "label": "15",
+        "voxel_value": 15,
+        "r": 181,
+        "g": 95,
+        "b": 50
+    },
+    {
+        "name": "Calcification",
+        "label": "16",
+        "voxel_value": 16,
+        "r": 170,
+        "g": 140,
+        "b": 72
+    }
+]
+

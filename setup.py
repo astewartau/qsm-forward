@@ -2,8 +2,10 @@ from setuptools import setup, find_packages
 
 setup(
     name='qsm-forward',
-    version='0.23',
+    version='0.24',
     packages=find_packages(),
+    include_package_data=True,
+    package_data={ 'qsm_forward': ['label.json'] },
     url='https://github.com/astewartau/qsm-forward',
     author='Ashley Stewart',
     author_email='a.stewart.au@gmail.com',

@@ -391,7 +391,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         json_dict = {
             'Subject': recon_params.subject,
             'Session': recon_params.session,
-            'Acquisition': recon_params.acquisition,
+            'Acquisition': recon_params.acq,
             'Run': recon_params.run,
             'EchoTime': recon_params.TEs[i],
             'MagneticFieldStrength': recon_params.B0,
