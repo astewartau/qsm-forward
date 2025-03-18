@@ -1,5 +1,7 @@
 # QSM Forward Model
 
+This package provides a Python API and CLI for simulating input data for Quantitative Susceptibility Mapping (QSM), including BIDS-compliant magnitude and phase MRI. This is also known as the QSM *forward problem* or *forward model*. A good quality forward model is important for testing and evaluating QSM algorithms under controlled conditions and in developing deep-learning models for QSM.
+
 Based on Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and evaluation of susceptibility mapping procedures. Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716
 
 Includes code for:
