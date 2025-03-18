@@ -1,6 +1,14 @@
 """
 Author: Ashley Stewart <a.stewart.au@gmail.com>
 
+Please cite the following work, which provided the original MATLAB implementation:
+
+Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head 
+phantom for MRI data simulation and evaluation of susceptibility mapping procedures. 
+Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716. 
+
+You may also cite the repository https://github.com/astewartau/qsm-forward.
+
 """
 
 from dipy.denoise.gibbs import gibbs_removal
