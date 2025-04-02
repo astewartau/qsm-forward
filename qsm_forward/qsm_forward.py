@@ -331,10 +331,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     # calculate field
     print("Computing field model...")
-    field = generate_field(tissue_params.chi.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
+    field = generate_field(tissue_params.chi.get_fdata(), tissue_params.mask.get_fdata(),voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
     if save_field:
         nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
-        local_field = generate_field(tissue_params.chi.get_fdata() * tissue_params.mask.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
+        local_field = generate_field(tissue_params.chi.get_fdata() * tissue_params.mask.get_fdata(), tissue_params.mask.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
         nib.save(resize(nib.Nifti1Image(dataobj=np.array(local_field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap-local.nii"))
 
     # simulate shim field
@@ -455,7 +455,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     print("Done!")
 
 
-def generate_field(chi, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
+def generate_field(chi, mask, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     """
     Perform the forward convolution operation.
 
@@ -479,6 +479,7 @@ def generate_field(chi, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     chitemp[:dims[0], :dims[1], :dims[2]] = chi
     field = np.real(np.fft.ifftn(np.fft.fftn(chitemp) * D))
     field = field[:dims[0], :dims[1], :dims[2]]
+    field = field - np.mean(field[mask != 0])
 
     return field
 
