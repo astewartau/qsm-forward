@@ -455,7 +455,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     print("Done!")
 
 
-def generate_field(chi, mask, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
+def generate_field(chi, mask=None, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     """
     Perform the forward convolution operation.
 
@@ -465,6 +465,12 @@ def generate_field(chi, mask, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     ----------
     chi : numpy.ndarray
         The susceptibility distribution array.
+    mask : numpy.ndarray
+        A binary mask that indicates the internal region of interest.
+    voxel_size : list, optional
+        The voxel size. Default is [1, 1, 1].
+    B0_dir : list, optional
+        The B0 direction. Default is [0, 0, 1].
 
     Returns
     -------
@@ -479,7 +485,8 @@ def generate_field(chi, mask, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
     chitemp[:dims[0], :dims[1], :dims[2]] = chi
     field = np.real(np.fft.ifftn(np.fft.fftn(chitemp) * D))
     field = field[:dims[0], :dims[1], :dims[2]]
-    field = field - np.mean(field[mask != 0])
+    if mask is not None:
+        field = field - np.mean(field[mask != 0])
 
     return field
 
