@@ -48,9 +48,9 @@ def main():
         sub_parser.add_argument('--save-chi', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-mask', nargs='?', type=argparse_bool, const=True, default=True)
         sub_parser.add_argument('--save-segmentation', nargs='?', type=argparse_bool, const=True, default=True)
-        sub_parser.add_argument('--save-field', nargs='?', type=argparse_bool, const=False, default=False)
-        sub_parser.add_argument('--save-shimmed-field', nargs='?', type=argparse_bool, const=False, default=False)
-        sub_parser.add_argument('--save-shimmed-offset-field', nargs='?', type=argparse_bool, const=False, default=False)
+        sub_parser.add_argument('--save-field', nargs='?', type=argparse_bool, const=True, default=False)
+        sub_parser.add_argument('--save-shimmed-field', nargs='?', type=argparse_bool, const=True, default=False)
+        sub_parser.add_argument('--save-shimmed-offset-field', nargs='?', type=argparse_bool, const=True, default=False)
 
     # Arguments specific to susceptibility sources simulation
     simplephantom_parser.add_argument('--resolution', default=[100, 100, 100], type=int, nargs=3)
