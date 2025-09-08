@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='qsm-forward',
-    version='0.24',
+    version='0.25',
     packages=find_packages(),
     include_package_data=True,
     package_data={ 'qsm_forward': ['label.json'] },
