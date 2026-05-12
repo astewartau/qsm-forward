@@ -51,6 +51,24 @@ def main():
         sub_parser.add_argument('--save-field', nargs='?', type=argparse_bool, const=True, default=False)
         sub_parser.add_argument('--save-shimmed-field', nargs='?', type=argparse_bool, const=True, default=False)
         sub_parser.add_argument('--save-shimmed-offset-field', nargs='?', type=argparse_bool, const=True, default=False)
+        sub_parser.add_argument('--save-chi-pos', nargs='?', type=argparse_bool, const=True, default=False, help='Save paramagnetic susceptibility map (chi+)')
+        sub_parser.add_argument('--save-chi-neg', nargs='?', type=argparse_bool, const=True, default=False, help='Save diamagnetic susceptibility map (chi-)')
+        sub_parser.add_argument('--save-r2prime', nargs='?', type=argparse_bool, const=True, default=False, help='Save R2\' map computed from chi+ and chi-')
+        sub_parser.add_argument('--dr-pos', default=114.0, type=float, help='Paramagnetic relaxivity (Hz/ppm) for R2\' computation (default: 114.0)')
+        sub_parser.add_argument('--dr-neg', default=30.0, type=float, help='Diamagnetic relaxivity (Hz/ppm) for R2\' computation (default: 30.0)')
+        sub_parser.add_argument('--chisep-signal', nargs='?', type=argparse_bool, const=True, default=False, help='Use chi-sep-aware signal model (R2 + Dr*|chi|) instead of R2*')
+        sub_parser.add_argument('--anisotropy', nargs='?', type=argparse_bool, const=True, default=False, help='Enable WM susceptibility anisotropy')
+        sub_parser.add_argument('--save-r2', nargs='?', type=argparse_bool, const=True, default=False, help='Save computed R2 map')
+        sub_parser.add_argument('--save-dr-pos', nargs='?', type=argparse_bool, const=True, default=False, help='Save paramagnetic relaxivity (Dr+) map')
+        sub_parser.add_argument('--save-dr-neg', nargs='?', type=argparse_bool, const=True, default=False, help='Save diamagnetic relaxivity (Dr-) map')
+        sub_parser.add_argument('--save-t2', nargs='?', type=argparse_bool, const=True, default=False, help='Save computed T2 map')
+
+    # Optional chi+ and chi- paths for head phantom
+    headphantom_parser.add_argument('--chi-pos', default=None, help='Path to paramagnetic susceptibility map (chi+)')
+    headphantom_parser.add_argument('--chi-neg', default=None, help='Path to diamagnetic susceptibility map (chi-)')
+    headphantom_parser.add_argument('--v1', default=None, help='Path to V1 eigenvector map (4D NIfTI) for WM anisotropy')
+    headphantom_parser.add_argument('--r2', default=None, help='Path to pre-computed R2 map')
+    headphantom_parser.add_argument('--angle-map', default=None, help='Path to fiber-to-field angle map (degrees)')
 
     # Arguments specific to susceptibility sources simulation
     simplephantom_parser.add_argument('--resolution', default=[100, 100, 100], type=int, nargs=3)
@@ -62,7 +80,14 @@ def main():
     args = parser.parse_args()
 
     if args.mode == 'head':
-        tissue_params = qsm_forward.TissueParams(args.data)
+        tissue_params = qsm_forward.TissueParams(
+            args.data,
+            chi_pos=args.chi_pos,
+            chi_neg=args.chi_neg,
+            v1=args.v1,
+            R2=args.r2,
+            angle_map=args.angle_map,
+        )
 
     elif args.mode == 'simple':
         tissue_params = qsm_forward.TissueParams(
@@ -109,7 +134,18 @@ def main():
         save_segmentation=args.save_segmentation,
         save_field=args.save_field,
         save_shimmed_field=args.save_shimmed_field,
-        save_shimmed_offset_field=args.save_shimmed_offset_field
+        save_shimmed_offset_field=args.save_shimmed_offset_field,
+        save_chi_pos=args.save_chi_pos,
+        save_chi_neg=args.save_chi_neg,
+        save_r2prime=args.save_r2prime,
+        dr_pos=args.dr_pos,
+        dr_neg=args.dr_neg,
+        chisep_signal=args.chisep_signal,
+        anisotropy=args.anisotropy,
+        save_r2=args.save_r2,
+        save_dr_pos=args.save_dr_pos,
+        save_dr_neg=args.save_dr_neg,
+        save_t2=args.save_t2,
     )
 
 if __name__ == "__main__":

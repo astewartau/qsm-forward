@@ -6,3 +6,5 @@ qsm_forward.egg-info/
 *bids/
 qsm/
 .venv
+venv/
+output/

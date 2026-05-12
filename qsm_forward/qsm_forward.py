@@ -13,14 +13,86 @@ You may also cite the repository https://github.com/astewartau/qsm-forward.
 
 from dipy.denoise.gibbs import gibbs_removal
 from nilearn.image import resample_img
+from scipy.ndimage import gaussian_filter
 
 import json
 import os
 import nibabel as nib
 import numpy as np
-import pkg_resources
+from importlib.metadata import version as _get_version
 import site
 import datetime
+
+
+# Per-tissue chi-separation parameters.
+# For each tissue label: (chi_pos_ref, chi_neg_ref, iron_frac)
+#   chi_pos_ref: paramagnetic susceptibility reference (ppm, >= 0)
+#   chi_neg_ref: diamagnetic susceptibility reference (ppm, <= 0)
+#   iron_frac: fraction of spatial chi variation attributed to iron (vs myelin)
+#
+# Values are informed by:
+#   Shin et al. (2021) NeuroImage 240:118371 (chi-separation)
+#   Wharton & Bowtell (2015) NeuroImage 104:199-209
+#   Lee et al. (2021) NeuroImage 226:117561
+# and constrained so chi_pos_ref + chi_neg_ref ≈ mean total chi from the
+# QSM Challenge 2.0 head phantom (Marques et al., 2021).
+CHISEP_TISSUE_PARAMS = {
+    1:  (0.050, -0.010, 0.85),  # Caudate — iron-rich deep gray matter
+    2:  (0.135, -0.010, 0.90),  # Globus pallidus — very iron-rich
+    3:  (0.045, -0.010, 0.85),  # Putamen — iron-rich deep gray matter
+    4:  (0.100, -0.006, 0.90),  # Red nucleus — very iron-rich
+    5:  (0.150, -0.009, 0.90),  # Dentate nucleus — very iron-rich
+    6:  (0.110, -0.008, 0.90),  # Substantia nigra & subthalamic — very iron-rich
+    7:  (0.025, -0.008, 0.70),  # Thalamus — moderate iron
+    8:  (0.012, -0.040, 0.20),  # White matter — myelin-dominant
+    9:  (0.022, -0.005, 0.60),  # Gray matter — mixed
+    10: (0.019,  0.000, 1.00),  # CSF — negligible iron/myelin
+    11: (0.133,  0.000, 1.00),  # Blood — deoxyhemoglobin (paramagnetic)
+    16: (0.000, -2.636, 0.00),  # Calcification — purely diamagnetic
+}
+
+# Per-tissue T2 values at 7T in milliseconds.
+# Values from Kumar et al. (2011, 2012) J Magn Reson Imaging, scaled to 7T.
+# Used by generate_t2_map() for simulating R2 maps.
+T2_TISSUE_PARAMS_7T = {
+    1:  57.46,   # Caudate nucleus
+    2:  41.47,   # Globus pallidus
+    3:  50.44,   # Putamen
+    4:  44.07,   # Red nucleus
+    5:  71.71,   # Dentate nucleus
+    6:  47.255,  # Substantia nigra
+    7:  56.62,   # Thalamus
+    8:  45.54,   # White matter
+    9:  84.71,   # Gray matter
+    10: 1029.6,  # CSF
+    11: 97.5,    # Blood
+}
+
+# Per-tissue R1 scaling factors for 7T-to-3T conversion.
+# R1_3T = R1_7T / factor for each tissue label.
+# From NeuroPoly Susceptibility-Separation-Phantom Map_creation_3T.m.
+R1_3T_DIVISION_FACTORS = {
+    1:  0.75929,  # Caudate
+    2:  0.73274,  # Globus pallidus
+    3:  0.74212,  # Putamen
+    4:  0.65,     # Red nucleus
+    5:  0.65,     # Dentate nucleus
+    6:  0.65,     # Substantia nigra
+    7:  0.73898,  # Thalamus
+    8:  0.72472,  # White matter
+    9:  0.73648,  # Gray matter
+    10: 1.0051,   # CSF
+    11: 0.75672,  # Blood
+}
+
+# White matter susceptibility anisotropy parameters.
+# For each WM label: (delta_chi, chi_0) in ppm.
+# chi_neg_aniso = delta_chi * cos^2(theta) + chi_0
+# where theta is the angle between fiber orientation and B0.
+# Values from Li et al. (2012) NeuroImage, Sibgatulin et al. (2021, 2022).
+WM_ANISOTROPY_PARAMS = {
+    8: (0.012, -0.040),  # Generic white matter
+}
 
 
 def is_editable_package(package_name):
@@ -51,7 +123,7 @@ def is_editable_package(package_name):
     return False
 
 def get_version():
-    return f"{pkg_resources.get_distribution('qsm-forward').version}" + (" (linked installation)" if is_editable_package('qsm-forward') else "")
+    return f"{_get_version('qsm-forward')}" + (" (linked installation)" if is_editable_package('qsm-forward') else "")
 
 class TissueParams:
     """
@@ -73,6 +145,12 @@ class TissueParams:
         The path to the brain mask file or a 3D numpy array containing brain mask values.
     seg_path : str or ndarray
         The path to the segmentation file or a 3D numpy array containing segmentation values.
+    chi_pos : str or ndarray or None
+        Optional path or array for paramagnetic susceptibility (chi+, >= 0).
+        If None, derived from chi as max(0, chi).
+    chi_neg : str or ndarray or None
+        Optional path or array for diamagnetic susceptibility (chi-, <= 0).
+        If None, derived from chi as min(0, chi).
     """
 
     def __init__(
@@ -84,8 +162,13 @@ class TissueParams:
             R2star = "maps/R2star.nii.gz",
             mask = "masks/BrainMask.nii.gz",
             seg = "masks/SegmentedModel.nii.gz",
+            chi_pos = None,
+            chi_neg = None,
             voxel_size = None,
-            apply_mask = False
+            apply_mask = False,
+            v1 = None,
+            R2 = None,
+            angle_map = None,
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
             raise ValueError(f"Path to chi is invalid! ({os.path.join(root_dir, chi)})")
@@ -95,6 +178,11 @@ class TissueParams:
         self._R2star = os.path.join(root_dir, R2star) if isinstance(R2star, str) and os.path.exists(os.path.join(root_dir, R2star)) else R2star if not isinstance(R2star, str) else None
         self._mask = os.path.join(root_dir, mask) if isinstance(mask, str) and os.path.exists(os.path.join(root_dir, mask)) else mask if not isinstance(mask, str) else None
         self._seg = os.path.join(root_dir, seg) if isinstance(seg, str) and os.path.exists(os.path.join(root_dir, seg)) else seg if not isinstance(seg, str) else None
+        self._chi_pos = os.path.join(root_dir, chi_pos) if isinstance(chi_pos, str) and os.path.exists(os.path.join(root_dir, chi_pos)) else chi_pos if not isinstance(chi_pos, str) else None
+        self._chi_neg = os.path.join(root_dir, chi_neg) if isinstance(chi_neg, str) and os.path.exists(os.path.join(root_dir, chi_neg)) else chi_neg if not isinstance(chi_neg, str) else None
+        self._v1 = os.path.join(root_dir, v1) if isinstance(v1, str) and os.path.exists(os.path.join(root_dir, v1)) else v1 if not isinstance(v1, str) else None
+        self._R2 = os.path.join(root_dir, R2) if isinstance(R2, str) and os.path.exists(os.path.join(root_dir, R2)) else R2 if not isinstance(R2, str) else None
+        self._angle_map = os.path.join(root_dir, angle_map) if isinstance(angle_map, str) and os.path.exists(os.path.join(root_dir, angle_map)) else angle_map if not isinstance(angle_map, str) else None
         self._apply_mask = apply_mask
         self._voxel_size = voxel_size
         self._affine = None
@@ -150,7 +238,57 @@ class TissueParams:
     
     @property
     def seg(self): return self._load(self._seg) if isinstance(self._seg, str) else nib.Nifti1Image(self._seg or self.mask.get_fdata(), affine=self.nii_affine, header=self.nii_header)
-    
+
+    @property
+    def v1(self):
+        if self._v1 is None:
+            return None
+        return self._load(self._v1) if isinstance(self._v1, str) else nib.Nifti1Image(self._v1, affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def R2(self):
+        if self._R2 is None:
+            return None
+        return self._do_apply_mask(self._load(self._R2) if isinstance(self._R2, str) else nib.Nifti1Image(self._R2, affine=self.nii_affine, header=self.nii_header))
+
+    @property
+    def angle_map(self):
+        if self._angle_map is None:
+            return None
+        return self._load(self._angle_map) if isinstance(self._angle_map, str) else nib.Nifti1Image(self._angle_map, affine=self.nii_affine, header=self.nii_header)
+
+    def _compute_chisep_maps(self):
+        """Compute and cache tissue-informed chi+ and chi- maps."""
+        chi_data = self.chi.get_fdata()
+        seg_data = self.seg.get_fdata()
+        mask_data = self.mask.get_fdata()
+        cp, cn = generate_chisep_maps(
+            chi_data, seg_data, mask_data,
+            voxel_size=self.voxel_size
+        )
+        self._cached_chi_pos = nib.Nifti1Image(cp, affine=self.nii_affine, header=self.nii_header)
+        self._cached_chi_neg = nib.Nifti1Image(cn, affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def chi_pos(self):
+        if self._chi_pos is not None:
+            nii = self._do_apply_mask(self._load(self._chi_pos) if isinstance(self._chi_pos, str) else nib.Nifti1Image(self._chi_pos, affine=self.nii_affine, header=self.nii_header))
+            return nii
+        # Use tissue-informed splitting (cached)
+        if not hasattr(self, '_cached_chi_pos'):
+            self._compute_chisep_maps()
+        return self._cached_chi_pos
+
+    @property
+    def chi_neg(self):
+        if self._chi_neg is not None:
+            nii = self._do_apply_mask(self._load(self._chi_neg) if isinstance(self._chi_neg, str) else nib.Nifti1Image(self._chi_neg, affine=self.nii_affine, header=self.nii_header))
+            return nii
+        # Use tissue-informed splitting (cached)
+        if not hasattr(self, '_cached_chi_neg'):
+            self._compute_chisep_maps()
+        return self._cached_chi_neg
+
 
 class ReconParams:
     """
@@ -255,7 +393,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr_pos=114.0, dr_neg=30.0, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -283,6 +421,16 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         Whether to save the cropped and shimmed field map to the BIDS directory. Default is False.
     save_shimmed_offset_field : bool
         Whether to save the cropped, shimmed and offset field map to the BIDS directory. Default is False.
+    save_chi_pos : bool
+        Whether to save the paramagnetic susceptibility map (chi+). Default is False.
+    save_chi_neg : bool
+        Whether to save the diamagnetic susceptibility map (chi-). Default is False.
+    save_r2prime : bool
+        Whether to save the R2' map computed from chi+ and chi-. Default is False.
+    dr_pos : float
+        Paramagnetic relaxivity in Hz/ppm for R2' computation. Default is 114.0.
+    dr_neg : float
+        Diamagnetic relaxivity in Hz/ppm for R2' computation. Default is 30.0.
 
     Returns
     -------
@@ -329,6 +477,25 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     print("Image-space cropping of segmentation...")
     if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
 
+    # chi-separation derivatives
+    if save_chi_pos or save_chi_neg or save_r2prime:
+        print("Computing chi-separation maps...")
+        chi_pos_nii = tissue_params.chi_pos
+        chi_neg_nii = tissue_params.chi_neg
+        if save_chi_pos:
+            print("Image-space resizing of chi+...")
+            nib.save(resize(chi_pos_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-pos.nii"))
+        if save_chi_neg:
+            print("Image-space resizing of chi-...")
+            chi_neg_abs_nii = nib.Nifti1Image(dataobj=np.abs(chi_neg_nii.get_fdata()), affine=chi_neg_nii.affine, header=chi_neg_nii.header)
+            nib.save(resize(chi_neg_abs_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-neg.nii"))
+        if save_r2prime:
+            print("Computing R2' from chi+ and chi-...")
+            r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr_pos=dr_pos, dr_neg=dr_neg)
+            r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
+            print("Image-space resizing of R2'...")
+            nib.save(resize(r2prime_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
+
     # calculate field
     print("Computing field model...")
     field = generate_field(tissue_params.chi.get_fdata(), tissue_params.mask.get_fdata(),voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
@@ -350,6 +517,53 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
         if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
+    # chi-sep-aware signal model setup
+    R2_data = None
+    dr_pos_data = None
+    dr_neg_data = None
+    chi_pos_data = None
+    chi_neg_data = None
+
+    if chisep_signal:
+        print("Setting up chi-sep-aware signal model...")
+
+        # Compute or load R2
+        if tissue_params.R2 is not None:
+            R2_data = tissue_params.R2.get_fdata()
+            print("  Using pre-loaded R2 map")
+        else:
+            print("  Computing T2/R2 maps from tissue segmentation...")
+            T2_data, R2_data = generate_t2_map(
+                seg=tissue_params.seg.get_fdata(),
+                R2star=tissue_params.R2star.get_fdata(),
+                M0=tissue_params.M0.get_fdata(),
+                B0=recon_params.B0
+            )
+            if save_t2:
+                nib.save(resize(nib.Nifti1Image(dataobj=T2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_T2map.nii"))
+
+        # Compute Dr maps
+        angle_data = tissue_params.angle_map.get_fdata() if (anisotropy and tissue_params.angle_map is not None) else None
+        print(f"  Computing Dr maps (anisotropy={anisotropy})...")
+        dr_pos_data, dr_neg_data = generate_dr_maps(
+            seg=tissue_params.seg.get_fdata(),
+            B0=recon_params.B0,
+            angle_map=angle_data,
+            anisotropy=anisotropy
+        )
+
+        if save_dr_pos:
+            nib.save(resize(nib.Nifti1Image(dataobj=dr_pos_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
+        if save_dr_neg:
+            nib.save(resize(nib.Nifti1Image(dataobj=dr_neg_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
+
+        # Get chi+/chi-
+        chi_pos_data = tissue_params.chi_pos.get_fdata()
+        chi_neg_data = tissue_params.chi_neg.get_fdata()
+
+        if save_r2:
+            nib.save(resize(nib.Nifti1Image(dataobj=R2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2map.nii"))
+
     # signal model
     multiecho = len(recon_params.TEs) > 1
     for i in range(len(recon_params.TEs)):
@@ -365,7 +579,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             phase_offset=phase_offset,
             R1=tissue_params.R1.get_fdata(),
             R2star=tissue_params.R2star.get_fdata(),
-            M0=tissue_params.M0.get_fdata()
+            M0=tissue_params.M0.get_fdata(),
+            R2=R2_data,
+            dr_pos=dr_pos_data,
+            dr_neg=dr_neg_data,
+            chi_pos=chi_pos_data,
+            chi_neg=chi_neg_data,
         )
     
         # k-space cropping of sigHR
@@ -490,6 +709,418 @@ def generate_field(chi, mask=None, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
 
     return field
 
+def generate_r2prime(chi_pos, chi_neg, dr_pos=114.0, dr_neg=30.0):
+    """
+    Compute the R2' map from paramagnetic and diamagnetic susceptibility components.
+
+    R2' represents the susceptibility-related contribution to transverse relaxation,
+    as used in chi-separation (Shin et al., 2021).
+
+    Parameters
+    ----------
+    chi_pos : numpy.ndarray
+        Paramagnetic susceptibility (>= 0) in ppm.
+    chi_neg : numpy.ndarray
+        Diamagnetic susceptibility (<= 0) in ppm.
+    dr_pos : float, optional
+        Paramagnetic relaxivity in Hz/ppm. Default is 114.0.
+    dr_neg : float, optional
+        Diamagnetic relaxivity in Hz/ppm. Default is 30.0.
+
+    Returns
+    -------
+    numpy.ndarray
+        R2' map in Hz.
+    """
+    return dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
+
+
+def generate_t2_map(seg, R2star, M0, B0=7, t2_params=None, gaussian_sigma=0.2):
+    """
+    Simulate a T2 map from tissue segmentation and compute R2 = 1/T2.
+
+    Assigns per-tissue T2 values from the literature and modulates them with
+    R2* and M0 maps for realistic intra-tissue texture, following the approach
+    of the NeuroPoly Susceptibility-Separation-Phantom (T2_simulation.m).
+
+    Parameters
+    ----------
+    seg : numpy.ndarray
+        3D tissue segmentation labels (integer-valued).
+    R2star : numpy.ndarray
+        3D R2* map in Hz (1/T2*).
+    M0 : numpy.ndarray
+        3D proton density / net magnetization map.
+    B0 : float, optional
+        Magnetic field strength in Tesla. Default is 7.
+    t2_params : dict or None, optional
+        Per-tissue T2 values in ms, keyed by label. Default uses T2_TISSUE_PARAMS_7T.
+    gaussian_sigma : float, optional
+        Sigma for Gaussian smoothing of the T2 map. Default is 0.2.
+
+    Returns
+    -------
+    T2 : numpy.ndarray
+        T2 map in milliseconds.
+    R2 : numpy.ndarray
+        R2 map in Hz (1/T2).
+    """
+    if t2_params is None:
+        t2_params = T2_TISSUE_PARAMS_7T
+
+    # Assign per-tissue T2 values
+    T2_uniform = np.zeros_like(seg, dtype=np.float64)
+    for label, t2_val in t2_params.items():
+        T2_uniform[seg == label] = t2_val
+
+    # Compute intra-tissue texture modulation from R2* and M0
+    R2star = np.array(R2star, dtype=np.float64)
+    M0 = np.array(M0, dtype=np.float64)
+    R2star[np.isnan(R2star)] = 0
+    M0[np.isnan(M0)] = 0
+
+    pct_r2star = np.zeros_like(seg, dtype=np.float64)
+    pct_m0 = np.zeros_like(seg, dtype=np.float64)
+    for label in t2_params:
+        region_mask = (seg == label)
+        if not region_mask.any():
+            continue
+        mean_r2star = np.mean(R2star[region_mask])
+        mean_m0 = np.mean(M0[region_mask])
+        if mean_r2star > 0:
+            pct_r2star[region_mask] = R2star[region_mask] / mean_r2star
+        if mean_m0 > 0:
+            pct_m0[region_mask] = M0[region_mask] / mean_m0
+
+    pct_combined = (pct_r2star + pct_m0) / 2.0
+    T2_textured = T2_uniform * pct_combined
+
+    # Gaussian smooth
+    T2_smoothed = gaussian_filter(T2_textured, sigma=gaussian_sigma)
+    T2_smoothed = np.maximum(T2_smoothed, 0)  # Clamp: smoothing can produce negatives at boundaries
+
+    # Scale for 3T if needed
+    if B0 == 3:
+        T2_smoothed = T2_smoothed / 0.65
+
+    # Compute R2 = 1000 / T2 (ms to Hz), only where T2 > 0
+    R2 = np.zeros_like(T2_smoothed)
+    valid = T2_smoothed > 0
+    R2[valid] = 1000.0 / T2_smoothed[valid]
+    R2[R2 > 300] = 0
+
+    # Scale R2 for 3T
+    if B0 == 3:
+        R2 = R2 * 0.65
+
+    return T2_smoothed, R2
+
+
+def generate_dr_maps(seg, B0=7, angle_map=None, anisotropy=False):
+    """
+    Generate spatially-varying Dr (relaxivity) maps for paramagnetic and diamagnetic
+    susceptibility components.
+
+    Translated from NeuroPoly Susceptibility-Separation-Phantom calculate_Dr.m.
+
+    Parameters
+    ----------
+    seg : numpy.ndarray
+        3D tissue segmentation labels.
+    B0 : float, optional
+        Magnetic field strength in Tesla. Default is 7.
+    angle_map : numpy.ndarray or None, optional
+        3D map of fiber-to-field angle in degrees. Required when anisotropy=True.
+    anisotropy : bool, optional
+        If True, use orientation-dependent Dr_neg for white matter. Default is False.
+
+    Returns
+    -------
+    dr_pos : numpy.ndarray
+        Paramagnetic relaxivity map in Hz/ppm (non-zero in gray matter regions).
+    dr_neg : numpy.ndarray
+        Diamagnetic relaxivity map in Hz/ppm (non-zero in white matter).
+    """
+    gamma = 42.58  # MHz/T (gyromagnetic ratio / 2pi)
+
+    # Dr_pos: (2*pi)^2 * gamma * B0 / (9*sqrt(3)) for non-WM regions
+    dr_pos_value = (2 * np.pi)**2 * gamma * B0 / (9 * np.sqrt(3))
+    non_wm_labels = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11]
+
+    dr_pos = np.zeros_like(seg, dtype=np.float64)
+    for label in non_wm_labels:
+        dr_pos[seg == label] = dr_pos_value
+
+    # Dr_neg: depends on anisotropy flag
+    dr_neg = np.zeros_like(seg, dtype=np.float64)
+    wm_mask = (seg == 8)
+
+    if anisotropy and angle_map is not None:
+        # Orientation-dependent: 0.5 * gamma * 2*pi * B0 * sin^2(theta)
+        angle_rad = np.deg2rad(angle_map.astype(np.float64))
+        dr_neg[wm_mask] = 0.5 * gamma * 2 * np.pi * B0 * np.sin(angle_rad[wm_mask])**2
+    else:
+        # Constant value for WM
+        dr_neg[wm_mask] = 700.8
+
+    dr_neg[np.isnan(dr_neg)] = 0
+
+    return dr_pos, dr_neg
+
+
+def scale_maps_to_3t(R2, R2star, R1, seg, T2=None):
+    """
+    Scale tissue parameter maps from 7T to 3T field strength.
+
+    Translated from NeuroPoly Susceptibility-Separation-Phantom Map_creation_3T.m.
+
+    Parameters
+    ----------
+    R2 : numpy.ndarray
+        R2 map in Hz at 7T.
+    R2star : numpy.ndarray
+        R2* map in Hz at 7T.
+    R1 : numpy.ndarray
+        R1 map in Hz at 7T.
+    seg : numpy.ndarray
+        Tissue segmentation labels.
+    T2 : numpy.ndarray or None, optional
+        T2 map in ms at 7T. If provided, also scaled.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys 'R2', 'R2star', 'R1', and optionally 'T2',
+        each containing the 3T-scaled map.
+    """
+    result = {
+        'R2': np.array(R2, dtype=np.float64) * 0.65,
+        'R2star': np.array(R2star, dtype=np.float64) * 0.5,
+    }
+
+    R1_3t = np.array(R1, dtype=np.float64).copy()
+    for label, factor in R1_3T_DIVISION_FACTORS.items():
+        mask = (seg == label)
+        if mask.any():
+            R1_3t[mask] = R1_3t[mask] / factor
+    result['R1'] = R1_3t
+
+    if T2 is not None:
+        result['T2'] = np.array(T2, dtype=np.float64) / 0.65
+
+    return result
+
+
+def apply_wm_anisotropy(chi_neg, seg, v1_map, B0_dir=np.array([0, 0, 1]),
+                         wm_params=None, R1=None, noise_sigma=0.01):
+    """
+    Apply white matter susceptibility anisotropy to the diamagnetic susceptibility map.
+
+    Models chi- in white matter as orientation-dependent:
+        chi_neg = delta_chi * cos^2(theta) + chi_0
+    where theta is the angle between fiber orientation (V1) and B0 direction.
+
+    Translated from NeuroPoly Susceptibility-Separation-Phantom PhantomCreation.m.
+
+    Parameters
+    ----------
+    chi_neg : numpy.ndarray
+        3D diamagnetic susceptibility map (<= 0, ppm). Modified in WM regions.
+    seg : numpy.ndarray
+        3D tissue segmentation labels.
+    v1_map : numpy.ndarray
+        4D array (x, y, z, 3) of primary eigenvector from diffusion tensor.
+    B0_dir : numpy.ndarray, optional
+        Direction of B0 field (3-element vector). Default is [0, 0, 1].
+    wm_params : dict or None, optional
+        Per-WM-label anisotropy parameters: {label: (delta_chi, chi_0)}.
+        Default uses WM_ANISOTROPY_PARAMS.
+    R1 : numpy.ndarray or None, optional
+        3D R1 map for texture modulation. If None, no texture noise is added.
+    noise_sigma : float, optional
+        Standard deviation for R1-weighted Gaussian noise. Default is 0.01.
+
+    Returns
+    -------
+    numpy.ndarray
+        Modified chi_neg array with anisotropic WM susceptibility.
+    """
+    if wm_params is None:
+        wm_params = WM_ANISOTROPY_PARAMS
+
+    chi_neg = chi_neg.copy()
+    B0_dir = B0_dir / np.linalg.norm(B0_dir)
+
+    for label, (delta_chi, chi_0) in wm_params.items():
+        wm_mask = (seg == label)
+        if not wm_mask.any():
+            continue
+
+        # Compute cos^2(theta) from V1 and B0 direction
+        v1 = v1_map[wm_mask]  # (N, 3)
+        cos_theta = np.abs(np.dot(v1, B0_dir))
+        cos2_theta = cos_theta ** 2
+
+        # Anisotropic chi_neg
+        chi_neg_aniso = delta_chi * cos2_theta + chi_0
+
+        # Optionally modulate with R1-weighted noise for texture
+        if R1 is not None and noise_sigma > 0:
+            mean_r1 = np.mean(R1[wm_mask])
+            if mean_r1 > 0:
+                pct_r1 = R1[wm_mask] / mean_r1
+                noise = np.random.normal(0, noise_sigma, size=pct_r1.shape)
+                pct_r1_noisy = pct_r1 + noise
+                # Apply 3 iterations of noise modulation (matching MATLAB)
+                for _ in range(3):
+                    noise = np.random.normal(0, noise_sigma, size=pct_r1_noisy.shape)
+                    pct_r1_noisy = pct_r1_noisy * (pct_r1 + noise)
+                chi_neg_aniso = chi_neg_aniso * pct_r1_noisy
+
+        chi_neg[wm_mask] = chi_neg_aniso
+
+    chi_neg[np.isnan(chi_neg)] = 0
+    return chi_neg
+
+
+def generate_chisep_maps(chi, seg, mask, voxel_size=(0.64, 0.64, 0.64),
+                         tissue_params=None, boundary_smooth_fwhm=1.2,
+                         noise_std=0.002, rng=None,
+                         v1_map=None, anisotropy=False,
+                         B0_dir=np.array([0, 0, 1]), R1=None):
+    """
+    Generate separate paramagnetic (chi+) and diamagnetic (chi-) susceptibility maps.
+
+    Uses the tissue segmentation to split the total susceptibility into iron
+    (paramagnetic, positive) and myelin (diamagnetic, negative) components based
+    on literature values for each tissue type. Spatial variation within each
+    tissue is inherited from the input chi map and distributed between chi+ and
+    chi- according to tissue-specific iron fractions.
+
+    Tissue boundaries are smoothed using Gaussian-weighted blending (following
+    the approach of Marques et al., 2021 for the QSM Challenge head phantom).
+
+    Parameters
+    ----------
+    chi : numpy.ndarray
+        Total susceptibility map in ppm (3D).
+    seg : numpy.ndarray
+        Tissue segmentation labels (3D, integer-valued).
+    mask : numpy.ndarray
+        Binary brain mask (3D).
+    voxel_size : tuple of float, optional
+        Voxel dimensions in mm. Default is (0.64, 0.64, 0.64).
+    tissue_params : dict or None, optional
+        Per-tissue parameters: {label: (chi_pos_ref, chi_neg_ref, iron_frac)}.
+        If None, uses CHISEP_TISSUE_PARAMS.
+    boundary_smooth_fwhm : float, optional
+        FWHM of Gaussian smoothing for tissue boundaries in mm. Default is 1.2.
+    noise_std : float, optional
+        Standard deviation of independent Gaussian noise added to chi+ and chi-
+        (in ppm). Set to 0 to disable. Default is 0.002.
+    rng : numpy.random.Generator or None, optional
+        Random number generator for reproducible noise. If None and noise_std > 0,
+        a new generator is created.
+
+    Returns
+    -------
+    chi_pos : numpy.ndarray
+        Paramagnetic susceptibility map (>= 0, ppm, float32).
+    chi_neg : numpy.ndarray
+        Diamagnetic susceptibility map (<= 0, ppm, float32).
+    """
+    if tissue_params is None:
+        tissue_params = CHISEP_TISSUE_PARAMS
+
+    # Gaussian sigma in voxels (FWHM = 2.355 * sigma)
+    sigma_vox = [boundary_smooth_fwhm / (2.355 * vs) for vs in voxel_size]
+
+    # Weighted accumulation for smooth tissue boundary blending
+    chi_pos_acc = np.zeros_like(chi, dtype=np.float64)
+    chi_neg_acc = np.zeros_like(chi, dtype=np.float64)
+    weight_acc = np.zeros_like(chi, dtype=np.float64)
+    assigned = np.zeros_like(chi, dtype=bool)
+
+    for label, (cp_ref, cn_ref, ifrac) in tissue_params.items():
+        tissue_hard = (seg == label)
+        if not tissue_hard.any():
+            continue
+        assigned |= tissue_hard
+
+        # Smooth tissue probability mask for boundary blending
+        tissue_prob = gaussian_filter(tissue_hard.astype(np.float64), sigma=sigma_vox)
+
+        # Per-voxel chi+ and chi- for this tissue
+        # Within the tissue: split the chi variation based on iron_frac
+        # Outside the tissue (boundary region): use reference values
+        chi_ref = cp_ref + cn_ref
+        delta = chi - chi_ref
+        cp_vals = cp_ref + ifrac * delta
+        cn_vals = cn_ref + (1.0 - ifrac) * delta
+
+        # At boundaries, use reference values (delta=0 outside tissue)
+        cp_vals = np.where(tissue_hard, cp_vals, cp_ref)
+        cn_vals = np.where(tissue_hard, cn_vals, cn_ref)
+
+        chi_pos_acc += tissue_prob * cp_vals
+        chi_neg_acc += tissue_prob * cn_vals
+        weight_acc += tissue_prob
+
+    # For any unassigned voxels in the mask, use simple max/min split
+    unassigned = (mask > 0) & ~assigned
+    if unassigned.any():
+        tissue_prob = gaussian_filter(unassigned.astype(np.float64), sigma=sigma_vox)
+        chi_pos_acc += tissue_prob * np.maximum(0, chi)
+        chi_neg_acc += tissue_prob * np.minimum(0, chi)
+        weight_acc += tissue_prob
+
+    # Normalize by total weight
+    valid = weight_acc > 1e-10
+    chi_pos = np.zeros_like(chi, dtype=np.float64)
+    chi_neg = np.zeros_like(chi, dtype=np.float64)
+    chi_pos[valid] = chi_pos_acc[valid] / weight_acc[valid]
+    chi_neg[valid] = chi_neg_acc[valid] / weight_acc[valid]
+
+    # Enforce sign constraints while preserving total chi
+    # If chi_neg > 0: all susceptibility is paramagnetic
+    chi_total = chi_pos + chi_neg
+    neg_violation = chi_neg > 0
+    chi_pos[neg_violation] = chi_total[neg_violation]
+    chi_neg[neg_violation] = 0.0
+
+    # If chi_pos < 0: all susceptibility is diamagnetic
+    pos_violation = chi_pos < 0
+    chi_neg[pos_violation] = chi_total[pos_violation]
+    chi_pos[pos_violation] = 0.0
+
+    # Apply brain mask
+    chi_pos *= (mask > 0)
+    chi_neg *= (mask > 0)
+
+    # Add small independent noise for realism
+    if noise_std > 0:
+        if rng is None:
+            rng = np.random.default_rng()
+        brain = mask > 0
+        # Spatially correlated noise (smooth white noise)
+        noise_smooth_sigma = [1.0 / vs for vs in voxel_size]  # ~1mm correlation
+        noise_pos = gaussian_filter(rng.normal(0, 1, chi.shape), sigma=noise_smooth_sigma)
+        noise_neg = gaussian_filter(rng.normal(0, 1, chi.shape), sigma=noise_smooth_sigma)
+        # Normalize to desired std within brain
+        noise_pos = noise_pos / (noise_pos[brain].std() + 1e-10) * noise_std
+        noise_neg = noise_neg / (noise_neg[brain].std() + 1e-10) * noise_std
+        chi_pos = np.maximum(0, chi_pos + noise_pos * brain)
+        chi_neg = np.minimum(0, chi_neg + noise_neg * brain)
+
+    # Apply WM susceptibility anisotropy if requested
+    if anisotropy and v1_map is not None:
+        chi_neg = apply_wm_anisotropy(
+            chi_neg, seg, v1_map, B0_dir=B0_dir, R1=R1
+        )
+
+    return chi_pos.astype(np.float32), chi_neg.astype(np.float32)
+
+
 def generate_phase_offset(M0, mask, dims):
     """
     Generate a suitable phase offset.
@@ -587,9 +1218,15 @@ def generate_shimmed_field(field, mask, order=2):
     
     return FIT3D, Residuals, b
 
-def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1):
+def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
+                    R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None):
     """
     Compute the MRI signal based on the given parameters.
+
+    Supports two decay models:
+    - Standard R2* model (default): decay = exp(-TE * R2star)
+    - Chi-sep-aware model: decay = exp(-TE * (R2 + dr_pos*|chi+| + dr_neg*|chi-|))
+      Activated when R2, dr_pos, dr_neg, chi_pos, and chi_neg are all provided.
 
     Parameters
     ----------
@@ -611,6 +1248,16 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
         The effective transverse relaxation rate. Can be a single value or a 3D numpy array. Default is 50.
     M0 : float or numpy.ndarray, optional
         The equilibrium magnetization. Can be a single value or a 3D numpy array. Default is 1.
+    R2 : numpy.ndarray or None, optional
+        Transverse relaxation rate (exchange-only, no susceptibility). Used with chi-sep model.
+    dr_pos : numpy.ndarray or None, optional
+        Paramagnetic relaxivity map in Hz/ppm. Used with chi-sep model.
+    dr_neg : numpy.ndarray or None, optional
+        Diamagnetic relaxivity map in Hz/ppm. Used with chi-sep model.
+    chi_pos : numpy.ndarray or None, optional
+        Paramagnetic susceptibility map in ppm. Used with chi-sep model.
+    chi_neg : numpy.ndarray or None, optional
+        Diamagnetic susceptibility map in ppm. Used with chi-sep model.
 
     Returns
     -------
@@ -619,7 +1266,15 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
 
     """
 
-    sigHR = M0 * np.exp(1j * (2 * np.pi * field * B0 * 42.58 * TE + phase_offset)) * np.exp(-TE * R2star) \
+    # Choose decay model
+    if R2 is not None and dr_pos is not None and dr_neg is not None and chi_pos is not None and chi_neg is not None:
+        # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
+        decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
+    else:
+        # Standard R2* model
+        decay = np.exp(-TE * R2star)
+
+    sigHR = M0 * np.exp(1j * (2 * np.pi * field * B0 * 42.58 * TE + phase_offset)) * decay \
         * (1 - np.exp(-TR * R1)) * np.sin(np.deg2rad(flip_angle)) / (1 - np.cos(np.deg2rad(flip_angle)) * np.exp(-TR * R1))
     sigHR[np.isnan(sigHR)] = 0
 
@@ -940,6 +1595,89 @@ def generate_susceptibility_phantom(resolution, background, large_cylinder_val, 
         array[small_cylinder] = small_val
     
     return array
+
+def generate_chisep_phantom(resolution, para_vals=None, dia_vals=None, para_radii=None, dia_radii=None):
+    """
+    Generate a phantom with separate paramagnetic and diamagnetic susceptibility sources.
+
+    Creates concentric cylinders: inner cylinders are paramagnetic (iron-like),
+    surrounded by shells that are diamagnetic (myelin-like). This mimics the
+    spatial relationship in brain tissue where iron-rich deep gray matter
+    nuclei are surrounded by myelinated white matter.
+
+    Parameters
+    ----------
+    resolution : list of int
+        The dimensions of the phantom [nx, ny, nz].
+    para_vals : list of float, optional
+        Paramagnetic susceptibility values (ppm, positive) for each source.
+        Default is [0.05, 0.10, 0.15, 0.20].
+    dia_vals : list of float, optional
+        Diamagnetic susceptibility values (ppm, negative) for each source.
+        Default is [-0.02, -0.03, -0.04, -0.05].
+    para_radii : list of float, optional
+        Radii of paramagnetic inner cylinders (voxels). Default is [4, 4, 4, 5].
+    dia_radii : list of float, optional
+        Outer radii of diamagnetic shells (voxels). Default is [7, 7, 7, 9].
+
+    Returns
+    -------
+    chi_pos : numpy.ndarray
+        Paramagnetic susceptibility map (>= 0).
+    chi_neg : numpy.ndarray
+        Diamagnetic susceptibility map (<= 0).
+    mask : numpy.ndarray
+        Binary mask of the phantom region.
+    """
+    if para_vals is None:
+        para_vals = [0.05, 0.10, 0.15, 0.20]
+    if dia_vals is None:
+        dia_vals = [-0.02, -0.03, -0.04, -0.05]
+    if para_radii is None:
+        para_radii = [4, 4, 4, 5]
+    if dia_radii is None:
+        dia_radii = [7, 7, 7, 9]
+
+    assert len(para_vals) == len(dia_vals) == len(para_radii) == len(dia_radii), \
+        "All source parameter lists must have the same length"
+
+    chi_pos = np.zeros(resolution, dtype=float)
+    chi_neg = np.zeros(resolution, dtype=float)
+
+    center = [res // 2 for res in resolution]
+    large_radius = min(center[1:]) * 0.75
+
+    z, y, x = np.indices(resolution)
+
+    # Cylinder height limits
+    lower_limit = (1 - 0.6) / 2 * resolution[0]
+    upper_limit = (1 + 0.6) / 2 * resolution[0]
+
+    # Large background cylinder (mask region)
+    mask = ((z - center[2])**2 + (y - center[1])**2 < large_radius**2) & \
+           (x >= (1 - 0.75) / 2 * resolution[0]) & (x < (1 + 0.75) / 2 * resolution[0])
+
+    # Place sources in a circle
+    n_sources = len(para_vals)
+    angle = 2 * np.pi / n_sources
+
+    for i in range(n_sources):
+        cy = center[1] + large_radius / 2 * np.sin(i * angle)
+        cz = center[2] + large_radius / 2 * np.cos(i * angle)
+
+        dist2 = (z - cz)**2 + (y - cy)**2
+        in_height = (x >= lower_limit) & (x < upper_limit)
+
+        # Diamagnetic shell (outer - inner)
+        shell = (dist2 < dia_radii[i]**2) & (dist2 >= para_radii[i]**2) & in_height
+        chi_neg[shell] = dia_vals[i]
+
+        # Paramagnetic core
+        core = (dist2 < para_radii[i]**2) & in_height
+        chi_pos[core] = para_vals[i]
+
+    return chi_pos, chi_neg, mask.astype(float)
+
 
 def simulate_susceptibility_sources(
     simulation_dim=160,
