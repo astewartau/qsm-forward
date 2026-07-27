@@ -1,1 +1,3 @@
 include qsm_forward/label.json
+include NOTICE
+include LICENSE

@@ -422,9 +422,71 @@ class TestWmAnisotropy:
         result = qsm_forward.apply_wm_anisotropy(
             chi_neg, seg, v1, B0_dir=B0_dir, R1=None, noise_sigma=0
         )
-        # With theta=0: chi_neg = delta_chi * 1 + chi_0 = 0.012 + (-0.040) = -0.028
-        expected = 0.012 * 1.0 + (-0.040)
+        # WM anisotropy uses the phantom's whole-WM average (delta_chi, chi_0).
+        # With theta=0: chi_neg = delta_chi * 1 + chi_0.
+        delta_chi, chi_0 = qsm_forward.WM_ANISOTROPY_PARAMS[8]
+        expected = delta_chi * 1.0 + chi_0
         np.testing.assert_allclose(result[2, 2, 2], expected, rtol=1e-10)
+
+
+class TestReferenceValues:
+    """Lock in the authoritative per-tissue values from the
+    Susceptibility-Separation-Phantom (SusceptibilityValues.mat / Tables 1-2)."""
+
+    def test_chisep_reference_values_match_phantom(self):
+        # (chi_pos, chi_neg) from data/chimodel/SusceptibilityValues.mat
+        # (fields chipos/chineg), label indices aligned to label.json.
+        expected = {
+            1:  (0.052650, -0.008650),
+            2:  (0.143723, -0.013223),
+            3:  (0.047061, -0.009061),
+            4:  (0.110906, -0.010906),
+            5:  (0.168412, -0.016412),
+            6:  (0.122434, -0.011434),
+            7:  (0.050904, -0.030904),
+            8:  (0.005900, -0.035900),
+            9:  (0.039182, -0.019182),
+            10: (0.027512, -0.008512),
+            11: (0.190000,  0.000000),
+        }
+        for label, (cp, cn) in expected.items():
+            cp_ref, cn_ref, _ = qsm_forward.CHISEP_TISSUE_PARAMS[label]
+            np.testing.assert_allclose(cp_ref, cp, atol=1e-6,
+                                       err_msg=f"chi_pos mismatch label {label}")
+            np.testing.assert_allclose(cn_ref, cn, atol=1e-6,
+                                       err_msg=f"chi_neg mismatch label {label}")
+
+    def test_chisep_total_reproduces_net_chi(self):
+        # chi_pos + chi_neg must reproduce the phantom's net per-tissue chi
+        # (chiref) for the deep-GM / WM / GM tissues.
+        expected_net = {
+            1: 0.044, 2: 0.1305, 3: 0.038, 7: 0.02,
+            8: -0.03, 9: 0.02, 10: 0.019, 11: 0.19,
+        }
+        for label, net in expected_net.items():
+            cp, cn, _ = qsm_forward.CHISEP_TISSUE_PARAMS[label]
+            np.testing.assert_allclose(cp + cn, net, atol=1e-4,
+                                       err_msg=f"net chi mismatch label {label}")
+
+    def test_wm_tract_anisotropy_reference_values(self):
+        # Table 1 of the phantom README / PhantomCreation.m deltaX_values,Xzero_values
+        assert qsm_forward.WM_TRACT_ANISOTROPY_PARAMS['body_corpus_callosum'] == (0.032, -0.0512)
+        assert qsm_forward.WM_TRACT_ANISOTROPY_PARAMS['posterior_thalamic_radiations'] == (0.016, -0.0592)
+        assert qsm_forward.WM_TRACT_ANISOTROPY_PARAMS['superior_longitudinal_fascicle'] == (-0.015, -0.0372)
+
+    def test_t2_reference_values_7t(self):
+        # T2_simulation.m region_values (7T, ms)
+        expected = [57.46, 41.47, 50.44, 44.07, 71.71, 47.255,
+                    56.62, 45.54, 84.71, 1029.6, 97.5]
+        for label, val in enumerate(expected, start=1):
+            assert qsm_forward.T2_TISSUE_PARAMS_7T[label] == val
+
+    def test_r1_3t_division_factors(self):
+        # Map_creation_3T.m division_factors
+        expected = [0.75929, 0.73274, 0.74212, 0.65, 0.65, 0.65,
+                    0.73898, 0.72472, 0.73648, 1.0051, 0.75672]
+        for label, val in enumerate(expected, start=1):
+            assert qsm_forward.R1_3T_DIVISION_FACTORS[label] == val
 
 
 class TestScaleMapsTo3T:

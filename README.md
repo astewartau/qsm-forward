@@ -4,6 +4,8 @@ This package provides a Python API and CLI for simulating input data for Quantit
 
 Based on Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and evaluation of susceptibility mapping procedures. Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716
 
+The optional chi-separation model (paramagnetic/diamagnetic susceptibility splitting, per-tissue χ⁺/χ⁻ reference values, white-matter anisotropy, and the chi-sep-aware GRE signal, T2/R2, Dr, R2′ and 3T-scaling maps) is a Python port of the [Susceptibility-Separation-Phantom](https://github.com/neuropoly/Susceptibility-Separation-Phantom) (MIT, © NeuroPoly 2024). Per-tissue χ⁺/χ⁻ and white-matter anisotropy values are taken from that phantom's `data/chimodel/SusceptibilityValues.mat` and README Tables 1–2. If you use these features, please also cite Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation. bioRxiv. https://doi.org/10.64898/2026.04.07.716972. See the [`NOTICE`](NOTICE) file for full attribution.
+
 Includes code for:
 
  - Field model (forward multiplication with dipole kernel based on chi)

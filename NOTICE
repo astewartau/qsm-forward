@@ -1,0 +1,62 @@
+qsm-forward
+===========
+
+qsm-forward is licensed under the GNU General Public License v3 (see LICENSE).
+
+This product includes code and data derived from third-party projects:
+
+-------------------------------------------------------------------------------
+1. Susceptibility-Separation-Phantom
+   https://github.com/neuropoly/Susceptibility-Separation-Phantom
+   Copyright (c) 2024 NeuroPoly
+   Licensed under the MIT License.
+
+   The chi-separation model in qsm_forward/qsm_forward.py (paramagnetic /
+   diamagnetic susceptibility splitting, per-tissue chi+/chi- reference values,
+   white-matter susceptibility anisotropy, the T2/R2, Dr, R2' and 3T-scaling
+   maps, and the chi-sep-aware GRE signal model) is a Python port of this
+   phantom. The per-tissue chi+/chi- values (CHISEP_TISSUE_PARAMS) and the
+   white-matter anisotropy values (WM_ANISOTROPY_PARAMS /
+   WM_TRACT_ANISOTROPY_PARAMS) are taken from the phantom's
+   data/chimodel/SusceptibilityValues.mat and README Tables 1-2.
+
+   Please cite:
+     Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic
+     in-silico brain phantom for quantifying susceptibility anisotropy-induced
+     error in susceptibility separation. bioRxiv.
+     https://doi.org/10.64898/2026.04.07.716972
+
+   MIT License text:
+
+     MIT License
+
+     Copyright (c) 2024 NeuroPoly
+
+     Permission is hereby granted, free of charge, to any person obtaining a copy
+     of this software and associated documentation files (the "Software"), to deal
+     in the Software without restriction, including without limitation the rights
+     to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+     copies of the Software, and to permit persons to whom the Software is
+     furnished to do so, subject to the following conditions:
+
+     The above copyright notice and this permission notice shall be included in all
+     copies or substantial portions of the Software.
+
+     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+     IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+     FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+     AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+     SOFTWARE.
+
+-------------------------------------------------------------------------------
+2. QSM Reconstruction Challenge 2.0 head phantom
+   Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic
+   in silico head phantom for MRI data simulation and evaluation of
+   susceptibility mapping procedures. Magnetic Resonance in Medicine, 86(1),
+   526-542. https://doi.org/10.1002/mrm.28716
+
+   The base head phantom (total susceptibility map, field/signal/relaxation
+   models) derives from this work.
+-------------------------------------------------------------------------------

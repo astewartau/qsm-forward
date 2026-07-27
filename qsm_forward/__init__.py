@@ -9,6 +9,7 @@ from .qsm_forward import (
     generate_t2_map, generate_dr_maps, scale_maps_to_3t,
     apply_wm_anisotropy,
     T2_TISSUE_PARAMS_7T, R1_3T_DIVISION_FACTORS, WM_ANISOTROPY_PARAMS,
+    WM_TRACT_ANISOTROPY_PARAMS,
 )
 __all__ = [
     'generate_bids', 'generate_field', 'generate_signal', 'add_noise',
@@ -20,4 +21,5 @@ __all__ = [
     'generate_t2_map', 'generate_dr_maps', 'scale_maps_to_3t',
     'apply_wm_anisotropy',
     'T2_TISSUE_PARAMS_7T', 'R1_3T_DIVISION_FACTORS', 'WM_ANISOTROPY_PARAMS',
+    'WM_TRACT_ANISOTROPY_PARAMS',
 ]

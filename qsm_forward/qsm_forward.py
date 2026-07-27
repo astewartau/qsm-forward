@@ -1,11 +1,26 @@
 """
 Author: Ashley Stewart <a.stewart.au@gmail.com>
 
-Please cite the following work, which provided the original MATLAB implementation:
+Please cite the following work, which provided the original MATLAB implementation
+of the base head phantom (total susceptibility, field/signal/relaxation models):
 
-Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head 
-phantom for MRI data simulation and evaluation of susceptibility mapping procedures. 
-Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716. 
+Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head
+phantom for MRI data simulation and evaluation of susceptibility mapping procedures.
+Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716.
+
+The chi-separation model implemented here (paramagnetic/diamagnetic susceptibility
+splitting, per-tissue chi+/chi- reference values, white-matter anisotropy, the
+T2/R2, Dr, R2', and 3T-scaling maps, and the chi-sep-aware GRE signal model) is a
+Python port of the Susceptibility-Separation-Phantom
+(https://github.com/neuropoly/Susceptibility-Separation-Phantom), MIT licensed,
+(c) NeuroPoly 2024. Per-tissue chi+/chi- values (CHISEP_TISSUE_PARAMS) and
+white-matter anisotropy values (WM_ANISOTROPY_PARAMS / WM_TRACT_ANISOTROPY_PARAMS)
+are taken from that phantom's data/chimodel/SusceptibilityValues.mat and Tables 1-2.
+Please additionally cite:
+
+Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain
+phantom for quantifying susceptibility anisotropy-induced error in susceptibility
+separation. bioRxiv. https://doi.org/10.64898/2026.04.07.716972
 
 You may also cite the repository https://github.com/astewartau/qsm-forward.
 
@@ -26,29 +41,48 @@ import datetime
 
 # Per-tissue chi-separation parameters.
 # For each tissue label: (chi_pos_ref, chi_neg_ref, iron_frac)
-#   chi_pos_ref: paramagnetic susceptibility reference (ppm, >= 0)
-#   chi_neg_ref: diamagnetic susceptibility reference (ppm, <= 0)
+#   chi_pos_ref: paramagnetic (iron) susceptibility reference (ppm, >= 0)
+#   chi_neg_ref: diamagnetic (myelin) susceptibility reference (ppm, <= 0)
 #   iron_frac: fraction of spatial chi variation attributed to iron (vs myelin)
 #
-# Values are informed by:
-#   Shin et al. (2021) NeuroImage 240:118371 (chi-separation)
-#   Wharton & Bowtell (2015) NeuroImage 104:199-209
-#   Lee et al. (2021) NeuroImage 226:117561
-# and constrained so chi_pos_ref + chi_neg_ref ≈ mean total chi from the
-# QSM Challenge 2.0 head phantom (Marques et al., 2021).
+# The chi_pos_ref / chi_neg_ref values are the AUTHORITATIVE per-tissue values
+# from the Susceptibility-Separation-Phantom (Ridani, De Leener & Alonso-Ortiz,
+# 2026; MIT, (c) NeuroPoly 2024), extracted from
+#   data/chimodel/SusceptibilityValues.mat  (struct array `label`, fields
+#   `chipos` and `chineg`).
+# These correspond to Table 2 of that phantom's README (ROI-averaged chi+/chi-).
+# The label indices align 1:1 with qsm-forward's SegmentedModel / label.json
+# (verified by matching tissue names: 1=Caudate ... 11=Blood, 12=Fat, 13=Bone,
+# 14=Air, 15=Muscle, 16=Calcification).
+#
+# In the phantom, chi_total(tissue) = chi_pos + chi_neg (see PhantomCreation.m
+# "Create Chi total"), so chi_pos_ref + chi_neg_ref reproduces the phantom's
+# net per-tissue chi (== the `chiref` field of the .mat for deep-GM/WM/GM).
+#
+# iron_frac controls how within-tissue spatial chi variation (delta from the
+# reference net chi) is distributed between chi+ and chi-. It is derived as
+# chi_pos_ref / (chi_pos_ref + |chi_neg_ref|) so that voxels with more total
+# chi push proportionally more signal into the paramagnetic component.
 CHISEP_TISSUE_PARAMS = {
-    1:  (0.050, -0.010, 0.85),  # Caudate — iron-rich deep gray matter
-    2:  (0.135, -0.010, 0.90),  # Globus pallidus — very iron-rich
-    3:  (0.045, -0.010, 0.85),  # Putamen — iron-rich deep gray matter
-    4:  (0.100, -0.006, 0.90),  # Red nucleus — very iron-rich
-    5:  (0.150, -0.009, 0.90),  # Dentate nucleus — very iron-rich
-    6:  (0.110, -0.008, 0.90),  # Substantia nigra & subthalamic — very iron-rich
-    7:  (0.025, -0.008, 0.70),  # Thalamus — moderate iron
-    8:  (0.012, -0.040, 0.20),  # White matter — myelin-dominant
-    9:  (0.022, -0.005, 0.60),  # Gray matter — mixed
-    10: (0.019,  0.000, 1.00),  # CSF — negligible iron/myelin
-    11: (0.133,  0.000, 1.00),  # Blood — deoxyhemoglobin (paramagnetic)
-    16: (0.000, -2.636, 0.00),  # Calcification — purely diamagnetic
+    1:  (0.052650, -0.008650, 0.859),  # Caudate nucleus
+    2:  (0.143723, -0.013223, 0.916),  # Globus pallidus
+    3:  (0.047061, -0.009061, 0.839),  # Putamen
+    4:  (0.110906, -0.010906, 0.910),  # Red nucleus
+    5:  (0.168412, -0.016412, 0.911),  # Dentate nucleus
+    6:  (0.122434, -0.011434, 0.915),  # Substantia nigra & subthalamic nucleus
+    7:  (0.050904, -0.030904, 0.622),  # Thalamus
+    8:  (0.005900, -0.035900, 0.141),  # White matter — myelin-dominant
+    9:  (0.039182, -0.019182, 0.671),  # Gray matter
+    10: (0.027512, -0.008512, 0.764),  # CSF
+    11: (0.190000,  0.000000, 1.000),  # Blood — deoxyhemoglobin (paramagnetic)
+    12: (0.038000, -0.019000, 0.667),  # Fat
+    13: (-2.100000, -4.200000, 0.000),  # Bone (diamagnetic; chi_pos also < 0)
+    14: (18.400000, -9.200000, 0.667),  # Air
+    # Muscle (15) and Calcification (16) are 0 in SusceptibilityValues.mat;
+    # calcification's strong diamagnetism is modelled directly in the base chi
+    # map rather than via the separation reference values.
+    15: (0.000000,  0.000000, 1.000),  # Muscle
+    16: (0.000000,  0.000000, 1.000),  # Calcification
 }
 
 # Per-tissue T2 values at 7T in milliseconds.
@@ -86,12 +120,53 @@ R1_3T_DIVISION_FACTORS = {
 }
 
 # White matter susceptibility anisotropy parameters.
-# For each WM label: (delta_chi, chi_0) in ppm.
-# chi_neg_aniso = delta_chi * cos^2(theta) + chi_0
-# where theta is the angle between fiber orientation and B0.
-# Values from Li et al. (2012) NeuroImage, Sibgatulin et al. (2021, 2022).
+# For each WM label: (delta_chi, chi_0) in ppm, where
+#   chi_neg_aniso = delta_chi * cos^2(theta) + chi_0
+# and theta is the angle between fiber orientation (V1) and B0.
+#
+# delta_chi (= chi_parallel - chi_perp) and chi_0 are the AUTHORITATIVE per-WM-tract
+# values from the Susceptibility-Separation-Phantom (Ridani, De Leener &
+# Alonso-Ortiz, 2026; MIT, (c) NeuroPoly 2024), Table 1 of that phantom's README,
+# encoded numerically in PhantomCreation.m (deltaX_values / Xzero_values):
+#
+#   Body of corpus callosum              : delta_chi=+0.032, chi_0=-0.0512
+#   Splenium of corpus callosum          : delta_chi=+0.024, chi_0=-0.0522
+#   Genu of corpus callosum              : delta_chi=+0.014, chi_0=-0.0382
+#   Anterior limb of internal capsule    : delta_chi=+0.016, chi_0=-0.0512
+#   Posterior thalamic radiations        : delta_chi=+0.016, chi_0=-0.0592
+#   Superior corona radiata              : delta_chi=+0.005, chi_0=-0.0442
+#   Posterior corona radiata             : delta_chi=+0.008, chi_0=-0.0542
+#   Anterior corona radiata              : delta_chi=+0.006, chi_0=-0.0462
+#   Posterior limb of internal capsule   : delta_chi=-0.015, chi_0=-0.0382
+#   Superior longitudinal fascicle       : delta_chi=-0.015, chi_0=-0.0372
+#
+# NOTE ON LABEL MAPPING: the phantom applies these per WM sub-tract using a
+# separate white_matter_mask.nii.gz (10 labelled tracts). qsm-forward's
+# SegmentedModel has only a single generic WM label (8) and no tract
+# sub-segmentation, so we cannot key anisotropy per-tract here without that map.
+# The default below uses whole-WM average values consistent with the phantom's
+# Table 2 (chi- with anisotropy averages ~-0.034 across WM, from chi_0 ~-0.0462
+# and delta_chi ~+0.010). If a per-tract WM sub-segmentation is supplied, extend
+# this dict with the tract labels and their (delta_chi, chi_0) values above.
 WM_ANISOTROPY_PARAMS = {
-    8: (0.012, -0.040),  # Generic white matter
+    8: (0.010, -0.0462),  # Generic white matter (whole-WM average of Table 1 tracts)
+}
+
+# Per-WM-tract anisotropy values (delta_chi, chi_0) in ppm, keyed by tract.
+# Not directly applicable to qsm-forward's single WM label (8) unless a WM
+# sub-segmentation is provided; retained here as the authoritative reference
+# (Susceptibility-Separation-Phantom Table 1 / PhantomCreation.m).
+WM_TRACT_ANISOTROPY_PARAMS = {
+    'body_corpus_callosum':            (0.032, -0.0512),
+    'splenium_corpus_callosum':        (0.024, -0.0522),
+    'genu_corpus_callosum':            (0.014, -0.0382),
+    'anterior_limb_internal_capsule':  (0.016, -0.0512),
+    'posterior_thalamic_radiations':   (0.016, -0.0592),
+    'superior_corona_radiata':         (0.005, -0.0442),
+    'posterior_corona_radiata':        (0.008, -0.0542),
+    'anterior_corona_radiata':         (0.006, -0.0462),
+    'posterior_limb_internal_capsule': (-0.015, -0.0382),
+    'superior_longitudinal_fascicle':  (-0.015, -0.0372),
 }
 
 
