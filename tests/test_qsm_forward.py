@@ -400,6 +400,46 @@ class TestChiSepSignalModel:
         assert np.abs(sig[1, 1, 1]) > 0
 
 
+class TestSESignalModel:
+    def test_se_decay_formula(self):
+        R1 = np.ones((3, 3, 3)) * 1.0
+        R2 = np.ones((3, 3, 3)) * 15.0
+        M0 = np.ones((3, 3, 3)) * 2.0
+        TR = 1.0
+        TE = 20e-3
+        sig = qsm_forward.generate_se_signal(TR=TR, TE=TE, R1=R1, R2=R2, M0=M0)
+        expected = 2.0 * (1 - np.exp(-TR * 1.0)) * np.exp(-TE * 15.0)
+        np.testing.assert_allclose(sig[1, 1, 1], expected, rtol=1e-12)
+
+    def test_se_is_real_and_nonnegative(self):
+        R1 = np.ones((4, 4, 4)) * 0.8
+        R2 = np.ones((4, 4, 4)) * 20.0
+        M0 = np.ones((4, 4, 4))
+        sig = qsm_forward.generate_se_signal(TR=1.0, TE=30e-3, R1=R1, R2=R2, M0=M0)
+        assert np.isrealobj(sig)
+        assert np.all(sig >= 0)
+
+    def test_se_uses_r2_not_r2star(self):
+        # SE decay must depend on R2 only; changing R2* (susceptibility dephasing) has no effect
+        R1 = np.ones((3, 3, 3))
+        R2 = np.ones((3, 3, 3)) * 15.0
+        M0 = np.ones((3, 3, 3))
+        sig_a = qsm_forward.generate_se_signal(TR=1.0, TE=20e-3, R1=R1, R2=R2, M0=M0)
+        sig_b = qsm_forward.generate_se_signal(TR=1.0, TE=20e-3, R1=R1, R2=R2 * 2, M0=M0)
+        assert not np.allclose(sig_a, sig_b)
+
+    def test_se_recovers_r2_from_two_echoes(self):
+        # Round-trip: fit R2 from a noiseless two-echo SE and recover the input
+        R1 = np.ones((2, 2, 2))
+        R2_true = np.ones((2, 2, 2)) * 25.0
+        M0 = np.ones((2, 2, 2))
+        TE1, TE2 = 10e-3, 40e-3
+        s1 = qsm_forward.generate_se_signal(TR=2.0, TE=TE1, R1=R1, R2=R2_true, M0=M0)
+        s2 = qsm_forward.generate_se_signal(TR=2.0, TE=TE2, R1=R1, R2=R2_true, M0=M0)
+        R2_fit = np.log(s1 / s2) / (TE2 - TE1)
+        np.testing.assert_allclose(R2_fit, R2_true, rtol=1e-10)
+
+
 class TestWmAnisotropy:
     def test_no_change_when_disabled(self):
         chi_neg = np.ones((5, 5, 5)) * -0.04
@@ -553,3 +593,29 @@ class TestCLINewFlags:
                 assert call_kwargs['save_dr_pos'] == True
                 assert call_kwargs['save_dr_neg'] == True
                 assert call_kwargs['save_t2'] == True
+
+    def test_save_se_flag_parsing(self):
+        with patch('sys.argv', ['qsm_forward', 'simple', '/tmp/bids',
+                                '--save-se', '--se-TR', '2.0',
+                                '--se-TEs', '0.01', '0.03', '0.05']):
+            from qsm_forward.main import main
+            with patch('qsm_forward.TissueParams') as mock_tp, \
+                 patch('qsm_forward.generate_bids') as mock_gb, \
+                 patch('qsm_forward.ReconParams') as mock_rp, \
+                 patch('qsm_forward.generate_susceptibility_phantom', return_value=np.zeros((10, 10, 10))):
+                mock_tp.return_value = MagicMock()
+                main()
+                assert mock_gb.call_args[1]['save_se'] == True
+                rp_kwargs = mock_rp.call_args[1]
+                assert rp_kwargs['se_TR'] == 2.0
+                np.testing.assert_allclose(rp_kwargs['se_TEs'], [0.01, 0.03, 0.05])
+
+    def test_save_se_flag_default_false(self):
+        with patch('sys.argv', ['qsm_forward', 'simple', '/tmp/bids']):
+            from qsm_forward.main import main
+            with patch('qsm_forward.TissueParams') as mock_tp, \
+                 patch('qsm_forward.generate_bids') as mock_gb, \
+                 patch('qsm_forward.generate_susceptibility_phantom', return_value=np.zeros((10, 10, 10))):
+                mock_tp.return_value = MagicMock()
+                main()
+                assert mock_gb.call_args[1]['save_se'] == False

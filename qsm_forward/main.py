@@ -62,6 +62,9 @@ def main():
         sub_parser.add_argument('--save-dr-pos', nargs='?', type=argparse_bool, const=True, default=False, help='Save paramagnetic relaxivity (Dr+) map')
         sub_parser.add_argument('--save-dr-neg', nargs='?', type=argparse_bool, const=True, default=False, help='Save diamagnetic relaxivity (Dr-) map')
         sub_parser.add_argument('--save-t2', nargs='?', type=argparse_bool, const=True, default=False, help='Save computed T2 map')
+        sub_parser.add_argument('--save-se', nargs='?', type=argparse_bool, const=True, default=False, help='Save a simulated multi-echo spin-echo (SE) acquisition (magnitude decays with R2, not R2*)')
+        sub_parser.add_argument('--se-TR', default=1.0, type=float, help='Repetition time (s) for the spin-echo acquisition (default: 1.0)')
+        sub_parser.add_argument('--se-TEs', default=[ 10e-3, 30e-3, 50e-3, 70e-3 ], type=float, nargs='+', help='Echo times (s) for the spin-echo acquisition')
 
     # Optional chi+ and chi- paths for head phantom
     headphantom_parser.add_argument('--chi-pos', default=None, help='Path to paramagnetic susceptibility map (chi+)')
@@ -122,7 +125,9 @@ def main():
         peak_snr=args.peak_snr,
         random_seed=args.random_seed,
         save_phase=args.save_phase,
-        suffix=args.suffix
+        suffix=args.suffix,
+        se_TR=args.se_TR,
+        se_TEs=np.array(args.se_TEs)
     )
 
     qsm_forward.generate_bids(
@@ -146,6 +151,7 @@ def main():
         save_dr_pos=args.save_dr_pos,
         save_dr_neg=args.save_dr_neg,
         save_t2=args.save_t2,
+        save_se=args.save_se,
     )
 
 if __name__ == "__main__":

@@ -405,6 +405,11 @@ class ReconParams:
         The BIDS-compliant suffix that defines the weighting of the images (e.g. T1w, T2starw, PD).
     save_phase : bool
         Boolean to control whether phase images are saved.
+    se_TR : float
+        Repetition time (in seconds) for the spin-echo acquisition. Default is 1.0.
+    se_TEs : np.array
+        Echo times (in seconds) for the spin-echo acquisition. Default is a
+        4-echo train spanning brain T2 (10-70 ms).
     """
 
     def __init__(
@@ -425,7 +430,9 @@ class ReconParams:
             peak_snr=np.inf,
             random_seed=None,
             suffix=None,
-            save_phase=True
+            save_phase=True,
+            se_TR=1.0,
+            se_TEs=np.array([ 10e-3, 30e-3, 50e-3, 70e-3 ])
         ):
         self.subject = subject
         self.session = session
@@ -443,9 +450,11 @@ class ReconParams:
         self.peak_snr = peak_snr
         self.random_seed = random_seed
         self.save_phase = save_phase
+        self.se_TR = se_TR
+        self.se_TEs = np.asarray(se_TEs)
         self.suffix = suffix
         if suffix is None:
-            self.suffix = "MEGRE" if len(TEs) > 1 else "T2starw"            
+            self.suffix = "MEGRE" if len(TEs) > 1 else "T2starw"
 
 def rotation_matrix_from_vectors(vec1, vec2):
     """ Compute the rotation matrix that aligns vec1 to vec2 """
@@ -468,7 +477,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr_pos=114.0, dr_neg=30.0, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr_pos=114.0, dr_neg=30.0, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -506,6 +515,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         Paramagnetic relaxivity in Hz/ppm for R2' computation. Default is 114.0.
     dr_neg : float
         Diamagnetic relaxivity in Hz/ppm for R2' computation. Default is 30.0.
+    save_se : bool
+        Whether to save a simulated multi-echo spin-echo (SE) acquisition, whose
+        magnitude decays with R2 (not R2*). Enables deriving R2' = R2* - R2 from
+        an SE/GRE pair. Uses recon_params.se_TR and recon_params.se_TEs. Default
+        is False.
 
     Returns
     -------
@@ -592,16 +606,15 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
         if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
-    # chi-sep-aware signal model setup
+    # transverse relaxation (R2) — shared by the chi-sep GRE model and the SE signal
     R2_data = None
     dr_pos_data = None
     dr_neg_data = None
     chi_pos_data = None
     chi_neg_data = None
 
-    if chisep_signal:
-        print("Setting up chi-sep-aware signal model...")
-
+    if chisep_signal or save_se:
+        print("Computing transverse relaxation (R2)...")
         # Compute or load R2
         if tissue_params.R2 is not None:
             R2_data = tissue_params.R2.get_fdata()
@@ -616,7 +629,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             )
             if save_t2:
                 nib.save(resize(nib.Nifti1Image(dataobj=T2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_T2map.nii"))
+        if save_r2:
+            nib.save(resize(nib.Nifti1Image(dataobj=R2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2map.nii"))
 
+    if chisep_signal:
+        print("Setting up chi-sep-aware GRE signal model...")
         # Compute Dr maps
         angle_data = tissue_params.angle_map.get_fdata() if (anisotropy and tissue_params.angle_map is not None) else None
         print(f"  Computing Dr maps (anisotropy={anisotropy})...")
@@ -635,9 +652,6 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         # Get chi+/chi-
         chi_pos_data = tissue_params.chi_pos.get_fdata()
         chi_neg_data = tissue_params.chi_neg.get_fdata()
-
-        if save_r2:
-            nib.save(resize(nib.Nifti1Image(dataobj=R2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2map.nii"))
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
@@ -719,6 +733,71 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if recon_params.save_phase:
             with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
+
+    # spin-echo signal (magnitude only; decays with R2, not R2*, and carries no susceptibility phase)
+    if save_se:
+        se_TEs = np.asarray(recon_params.se_TEs)
+        se_TR = recon_params.se_TR
+        multiecho_se = len(se_TEs) > 1
+        se_suffix = "MESE" if multiecho_se else "T2w"
+        for i in range(len(se_TEs)):
+            print(f"Computing SE signal for echo {i+1}...")
+            recon_name_i = f"{recon_name}_echo-{i+1}" if multiecho_se else recon_name
+
+            # cast to complex (zero phase) so k-space cropping takes the fast
+            # complex path — matching the GRE pipeline, which skips the expensive
+            # Gibbs-unring step that a real-valued input would otherwise trigger
+            sigHR = generate_se_signal(
+                TR=se_TR,
+                TE=se_TEs[i],
+                R1=tissue_params.R1.get_fdata(),
+                R2=R2_data,
+                M0=tissue_params.M0.get_fdata(),
+            ).astype(np.complex128)
+
+            # k-space cropping of sigHR
+            print(f"k-space cropping of SE signal for echo {i+1}...")
+            resolution = np.array(np.round((np.array(tissue_params.voxel_size) / recon_params.voxel_size) * np.array(tissue_params.nii_header.get_data_shape())), dtype=int)
+            sigHR_cropped = crop_kspace(sigHR, resolution)
+            del sigHR
+
+            # noise (complex noise -> Rician magnitude, matching the GRE path)
+            if recon_params.random_seed is not None:
+                print(f"Simulating noise for SE echo {i+1} with random seed {recon_params.random_seed}...")
+                sigHR_cropped_noisy = add_noise(sigHR_cropped, peak_snr=recon_params.peak_snr, rng=rng)
+            else:
+                sigHR_cropped_noisy = np.array(sigHR_cropped)
+            del sigHR_cropped
+
+            # save nifti (magnitude only; SE phase is refocused and not informative)
+            mag_filename = f"{recon_name_i}" + ("_part-mag" if recon_params.save_phase else "") + f"_{se_suffix}"
+            description = f"TE={se_TEs[i]}; TR={se_TR}; B0={recon_params.B0}; B0_dir={recon_params.B0_dir}; acq=spin-echo"
+            mag_nii = nib.Nifti1Image(dataobj=np.abs(sigHR_cropped_noisy), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header)
+            mag_nii.header['descrip'] = description
+            nib.save(mag_nii, filename=os.path.join(subject_dir, "anat", f"{mag_filename}.nii"))
+            del sigHR_cropped_noisy
+
+            # json header
+            print(f"Creating SE JSON header for echo {i+1}...")
+            json_dict = {
+                'Subject': recon_params.subject,
+                'Session': recon_params.session,
+                'Acquisition': recon_params.acq,
+                'Run': recon_params.run,
+                'EchoTime': se_TEs[i],
+                'MagneticFieldStrength': recon_params.B0,
+                'EchoNumber': i+1,
+                'ProtocolName': se_suffix,
+                'ConversionSoftware': 'qsm-forward',
+                'RepetitionTime': se_TR,
+                'B0_dir': recon_params.B0_dir.tolist(),
+                'VoxelSize': recon_params.voxel_size.tolist(),
+                'PeakSNR': recon_params.peak_snr if recon_params.peak_snr != np.inf else "inf",
+                'PulseSequenceType': 'Spin Echo',
+                'ImageType': ['M', 'MAGNITUDE'],
+            }
+            with open(os.path.join(subject_dir, "anat", f"{mag_filename}.json"), 'w') as se_json_file:
+                json.dump(json_dict, se_json_file)
 
     print(f"Generating details for BIDS datset_description.json...")
     dataset_description = {
@@ -1354,6 +1433,43 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
     sigHR[np.isnan(sigHR)] = 0
 
     return sigHR
+
+def generate_se_signal(TR=1.0, TE=30e-3, R1=1, R2=50, M0=1):
+    """
+    Compute the spin-echo (SE) magnitude signal.
+
+        S_SE = M0 * (1 - exp(-TR * R1)) * exp(-TE * R2)
+
+    Unlike the gradient-echo signal, the 180-degree refocusing pulse reverses
+    static (susceptibility-induced) dephasing, so the SE magnitude decays with
+    the irreversible transverse relaxation rate R2 (not R2*) and carries no
+    susceptibility-induced phase. This is the forward-model extension of Stoll
+    (2025), Eq. 3.5 — pairing an SE R2 acquisition with the GRE R2* acquisition
+    lets a chi-separation method derive R2' = R2* - R2 the same way it would from
+    real data, instead of being handed a ground-truth R2' map.
+
+    Parameters
+    ----------
+    TR : float, optional
+        Repetition time in seconds. Default is 1.0.
+    TE : float, optional
+        Echo time in seconds. Default is 30e-3.
+    R1 : float or numpy.ndarray, optional
+        Longitudinal relaxation rate in Hz. Default is 1.
+    R2 : float or numpy.ndarray, optional
+        Transverse relaxation rate in Hz (1/T2), NOT R2*. Default is 50.
+    M0 : float or numpy.ndarray, optional
+        Equilibrium magnetization. Default is 1.
+
+    Returns
+    -------
+    numpy.ndarray
+        The computed SE magnitude signal (real, non-negative).
+    """
+    sig = M0 * (1 - np.exp(-TR * R1)) * np.exp(-TE * R2)
+    sig = np.asarray(sig, dtype=np.float64)
+    sig[np.isnan(sig)] = 0
+    return sig
 
 def add_noise(sig, peak_snr=np.inf, rng=None):
     """
