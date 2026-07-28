@@ -331,11 +331,10 @@ class TestGenerateT2Map:
 
 
 class TestGenerateDrMaps:
-    def test_dr_pos_formula(self):
+    def test_dr_pos_single_kernel(self):
         seg = np.ones((5, 5, 5), dtype=np.float64) * 9  # All GM
         dr_pos, dr_neg = qsm_forward.generate_dr_maps(seg, B0=7)
-        expected = (2 * np.pi)**2 * 42.58 * 7 / (9 * np.sqrt(3))
-        np.testing.assert_allclose(dr_pos[2, 2, 2], expected)
+        np.testing.assert_allclose(dr_pos[2, 2, 2], qsm_forward.DR_KERNEL)
 
     def test_wm_has_zero_dr_pos(self):
         seg = np.ones((5, 5, 5), dtype=np.float64) * 8  # All WM
@@ -345,19 +344,52 @@ class TestGenerateDrMaps:
     def test_dr_neg_constant_mode(self):
         seg = np.ones((5, 5, 5), dtype=np.float64) * 8  # All WM
         dr_pos, dr_neg = qsm_forward.generate_dr_maps(seg, B0=7, anisotropy=False)
-        assert np.all(dr_neg == 700.8)
+        assert np.all(dr_neg == qsm_forward.DR_KERNEL)
 
     def test_dr_neg_anisotropy_mode(self):
         seg = np.ones((5, 5, 5), dtype=np.float64) * 8  # All WM
         angle_map = np.ones((5, 5, 5)) * 45.0  # 45 degrees
         dr_pos, dr_neg = qsm_forward.generate_dr_maps(seg, B0=7, angle_map=angle_map, anisotropy=True)
-        expected = 0.5 * 42.58 * 2 * np.pi * 7 * np.sin(np.deg2rad(45))**2
+        expected = qsm_forward.DR_KERNEL * np.sin(np.deg2rad(45))**2
         np.testing.assert_allclose(dr_neg[2, 2, 2], expected, rtol=1e-10)
+
+    def test_dr_custom_kernel(self):
+        seg = np.ones((5, 5, 5), dtype=np.float64) * 9  # All GM
+        dr_pos, dr_neg = qsm_forward.generate_dr_maps(seg, B0=7, dr=100.0)
+        np.testing.assert_allclose(dr_pos[2, 2, 2], 100.0)
 
     def test_non_wm_has_zero_dr_neg(self):
         seg = np.ones((5, 5, 5), dtype=np.float64) * 9  # All GM
         dr_pos, dr_neg = qsm_forward.generate_dr_maps(seg, B0=7)
         assert np.all(dr_neg == 0)
+
+
+class TestGenerateR2prime:
+    def test_single_kernel_default(self):
+        cp = np.array([0.1, 0.0, 0.05])
+        cn = np.array([0.0, -0.2, -0.1])
+        r2p = qsm_forward.generate_r2prime(cp, cn)
+        expected = qsm_forward.DR_KERNEL * (np.abs(cp) + np.abs(cn))
+        np.testing.assert_allclose(r2p, expected)
+
+    def test_dr_kernel_value(self):
+        assert qsm_forward.DR_KERNEL == 137.0
+
+    def test_split_opt_in(self):
+        cp = np.array([0.1, 0.05])
+        cn = np.array([-0.2, -0.1])
+        r2p = qsm_forward.generate_r2prime(cp, cn, dr=114.0, dr_neg=30.0)
+        expected = 114.0 * np.abs(cp) + 30.0 * np.abs(cn)
+        np.testing.assert_allclose(r2p, expected)
+
+    def test_signal_r2prime_matches_generate_r2prime(self):
+        # The chi-sep GRE decay's R2' contribution must equal generate_r2prime
+        # exactly when the single scalar kernel is passed voxel-wise.
+        cp = np.abs(np.random.RandomState(0).rand(4, 4, 4)) * 0.1
+        cn = -np.abs(np.random.RandomState(1).rand(4, 4, 4)) * 0.1
+        r2p = qsm_forward.generate_r2prime(cp, cn)
+        signal_r2p = qsm_forward.DR_KERNEL * np.abs(cp) + qsm_forward.DR_KERNEL * np.abs(cn)
+        np.testing.assert_allclose(r2p, signal_r2p, rtol=1e-12)
 
 
 class TestChiSepSignalModel:

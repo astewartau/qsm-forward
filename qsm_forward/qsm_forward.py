@@ -85,6 +85,41 @@ CHISEP_TISSUE_PARAMS = {
     16: (0.000000,  0.000000, 1.000),  # Calcification
 }
 
+# -----------------------------------------------------------------------------
+# Susceptibility -> R2' relaxivity ("magnitude decay kernel", D_r).
+#
+# The chi-separation biophysical model (Shin et al., NeuroImage 2021) treats
+# susceptibility sources as uniformly magnetised spheres in the static-dephasing
+# regime, which yields a SINGLE, spatially-invariant magnitude decay kernel that
+# relates R2' to the ABSOLUTE susceptibility of BOTH source types:
+#
+#     R2' = D_r * (|chi_pos| + |chi_neg|)
+#
+# i.e. paramagnetic (iron) and diamagnetic (myelin) sources share one relaxivity
+# -- dephasing depends on the magnitude of the field perturbation, not its sign.
+# This is the convention used by every published chi-separation method we know of
+# (chi-sep iLSQR/MEDI, chi-sepnet, SUSEP-Net, APART-QSM, WaveSep) and by the
+# forward model of Stoll (2025), which we follow.
+#
+# We use D_r = 137 Hz/ppm, the empirically measured value from Shin et al.'s
+# multi-orientation chi-separation work (2022). The COSMOS-referenced value of
+# 114 Hz/ppm (chi-sepnet; R^2 = 0.93) is an equivalent single-kernel estimate
+# that differs only by the QSM algorithm used to calibrate it.
+#
+# A SPLIT model (distinct D_r+ for iron and D_r- for myelin) is deliberately NOT
+# the default. Real tissue microstructure (spherical ferritin vs anisotropic
+# cylindrical myelin, different diffusion regimes) plausibly does give the two
+# source types different EFFECTIVE relaxivities, but: (a) the split is not
+# recoverable from the data -- with one QSM + one R2' map the relaxivities must
+# be assumed a priori, not estimated -- so encoding a specific split into the
+# ground truth mainly rewards whichever method shares that exact assumption;
+# (b) no widely-used chi-separation method or reference phantom adopts a split;
+# and (c) the particular split we previously defaulted to (D_r+ = 114,
+# D_r- = 30) had no published basis. A split remains available as an explicit
+# opt-in (pass `dr_neg`) for sensitivity studies, but it is off by default.
+# -----------------------------------------------------------------------------
+DR_KERNEL = 137.0  # Hz/ppm; single-kernel susceptibility->R2' relaxivity (Shin 2022)
+
 # Per-tissue T2 values at 7T in milliseconds.
 # Values from Kumar et al. (2011, 2012) J Magn Reson Imaging, scaled to 7T.
 # Used by generate_t2_map() for simulating R2 maps.
@@ -477,7 +512,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr_pos=114.0, dr_neg=30.0, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -511,10 +546,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         Whether to save the diamagnetic susceptibility map (chi-). Default is False.
     save_r2prime : bool
         Whether to save the R2' map computed from chi+ and chi-. Default is False.
-    dr_pos : float
-        Paramagnetic relaxivity in Hz/ppm for R2' computation. Default is 114.0.
-    dr_neg : float
-        Diamagnetic relaxivity in Hz/ppm for R2' computation. Default is 30.0.
+    dr : float
+        Magnitude decay kernel in Hz/ppm relating |chi| to R2' (single kernel for
+        both source types; see the DR_KERNEL note). Default is DR_KERNEL (137.0).
+    dr_neg : float or None
+        Optional separate diamagnetic relaxivity in Hz/ppm. None (default) uses the
+        single kernel ``dr`` for both source types; pass a value to opt into a
+        non-standard split model for the R2' map AND the chi-sep signal.
     save_se : bool
         Whether to save a simulated multi-echo spin-echo (SE) acquisition, whose
         magnitude decays with R2 (not R2*). Enables deriving R2' = R2* - R2 from
@@ -580,7 +618,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             nib.save(resize(chi_neg_abs_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-neg.nii"))
         if save_r2prime:
             print("Computing R2' from chi+ and chi-...")
-            r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr_pos=dr_pos, dr_neg=dr_neg)
+            r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr=dr, dr_neg=dr_neg)
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
             nib.save(resize(r2prime_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
@@ -634,24 +672,37 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
     if chisep_signal:
         print("Setting up chi-sep-aware GRE signal model...")
-        # Compute Dr maps
-        angle_data = tissue_params.angle_map.get_fdata() if (anisotropy and tissue_params.angle_map is not None) else None
-        print(f"  Computing Dr maps (anisotropy={anisotropy})...")
-        dr_pos_data, dr_neg_data = generate_dr_maps(
-            seg=tissue_params.seg.get_fdata(),
-            B0=recon_params.B0,
-            angle_map=angle_data,
-            anisotropy=anisotropy
-        )
-
-        if save_dr_pos:
-            nib.save(resize(nib.Nifti1Image(dataobj=dr_pos_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
-        if save_dr_neg:
-            nib.save(resize(nib.Nifti1Image(dataobj=dr_neg_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
-
         # Get chi+/chi-
         chi_pos_data = tissue_params.chi_pos.get_fdata()
         chi_neg_data = tissue_params.chi_neg.get_fdata()
+
+        # Relaxivity (magnitude decay kernel). Default: single scalar kernel
+        # applied voxel-wise, which makes the GRE R2' contribution
+        # (dr_pos*|chi+| + dr_neg*|chi-|) IDENTICAL to generate_r2prime and, with
+        # the SE R2 decay, to the derivable R2' = R2* - R2. anisotropy is an
+        # opt-in that swaps in a spatially-varying orientation-dependent map.
+        if anisotropy and tissue_params.angle_map is not None:
+            print("  Computing orientation-dependent Dr maps (anisotropy=True)...")
+            dr_pos_data, dr_neg_data = generate_dr_maps(
+                seg=tissue_params.seg.get_fdata(),
+                B0=recon_params.B0,
+                angle_map=tissue_params.angle_map.get_fdata(),
+                anisotropy=True,
+                dr=dr
+            )
+        else:
+            dr_pos_data = dr
+            dr_neg_data = dr if dr_neg is None else dr_neg
+
+        if save_dr_pos or save_dr_neg:
+            # Broadcast scalar kernels to masked constant maps for saving
+            mask_data = tissue_params.mask.get_fdata()
+            dr_pos_map = dr_pos_data if np.ndim(dr_pos_data) else dr_pos_data * mask_data
+            dr_neg_map = dr_neg_data if np.ndim(dr_neg_data) else dr_neg_data * mask_data
+            if save_dr_pos:
+                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_pos_map, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
+            if save_dr_neg:
+                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_neg_map, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
@@ -863,12 +914,21 @@ def generate_field(chi, mask=None, voxel_size=[1, 1, 1], B0_dir=[0, 0, 1]):
 
     return field
 
-def generate_r2prime(chi_pos, chi_neg, dr_pos=114.0, dr_neg=30.0):
+def generate_r2prime(chi_pos, chi_neg, dr=DR_KERNEL, dr_neg=None):
     """
     Compute the R2' map from paramagnetic and diamagnetic susceptibility components.
 
-    R2' represents the susceptibility-related contribution to transverse relaxation,
-    as used in chi-separation (Shin et al., 2021).
+    R2' is the susceptibility-related (reversible) contribution to transverse
+    relaxation used in chi-separation (Shin et al., 2021). By default a SINGLE
+    magnitude decay kernel is applied to both source types (the standard
+    static-dephasing model):
+
+        R2' = dr * (|chi_pos| + |chi_neg|)
+
+    A split model is available as an explicit opt-in by passing ``dr_neg`` (this
+    is non-standard -- see the DR_KERNEL note above):
+
+        R2' = dr * |chi_pos| + dr_neg * |chi_neg|
 
     Parameters
     ----------
@@ -876,17 +936,22 @@ def generate_r2prime(chi_pos, chi_neg, dr_pos=114.0, dr_neg=30.0):
         Paramagnetic susceptibility (>= 0) in ppm.
     chi_neg : numpy.ndarray
         Diamagnetic susceptibility (<= 0) in ppm.
-    dr_pos : float, optional
-        Paramagnetic relaxivity in Hz/ppm. Default is 114.0.
-    dr_neg : float, optional
-        Diamagnetic relaxivity in Hz/ppm. Default is 30.0.
+    dr : float, optional
+        Magnitude decay kernel in Hz/ppm applied to |chi_pos| (and to |chi_neg|
+        too, unless ``dr_neg`` is given). Default is DR_KERNEL (137.0).
+    dr_neg : float or None, optional
+        Optional separate diamagnetic relaxivity in Hz/ppm. If None (default) the
+        single kernel ``dr`` is used for both source types. Pass a value to opt
+        into a non-standard split model.
 
     Returns
     -------
     numpy.ndarray
         R2' map in Hz.
     """
-    return dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
+    if dr_neg is None:
+        dr_neg = dr
+    return dr * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
 
 
 def generate_t2_map(seg, R2star, M0, B0=7, t2_params=None, gaussian_sigma=0.2):
@@ -970,23 +1035,41 @@ def generate_t2_map(seg, R2star, M0, B0=7, t2_params=None, gaussian_sigma=0.2):
     return T2_smoothed, R2
 
 
-def generate_dr_maps(seg, B0=7, angle_map=None, anisotropy=False):
+def generate_dr_maps(seg, B0=7, angle_map=None, anisotropy=False, dr=DR_KERNEL):
     """
-    Generate spatially-varying Dr (relaxivity) maps for paramagnetic and diamagnetic
-    susceptibility components.
+    Generate spatially-varying Dr (magnitude decay kernel) maps for the
+    paramagnetic and diamagnetic susceptibility components.
 
-    Translated from NeuroPoly Susceptibility-Separation-Phantom calculate_Dr.m.
+    Both source types share the single empirical kernel ``dr`` (see the DR_KERNEL
+    note above): paramagnetic sources are assigned ``dr`` in the deep/cortical
+    grey-matter regions, diamagnetic sources ``dr`` in white matter. This is only
+    needed for the anisotropy opt-in; the default (isotropic) chi-separation
+    signal path applies the single scalar kernel voxel-wise instead (see
+    generate_bids), which is exactly consistent with generate_r2prime.
+
+    NOTE: this function is an EXPERIMENTAL opt-in used only when anisotropy=True.
+    The original NeuroPoly translation used a theoretical static-dephasing sphere
+    kernel (~755 Hz/ppm at 7T); it has been rebased onto the empirical single
+    kernel ``dr`` so the whole pipeline shares one relaxivity scale. When
+    anisotropy=True the diamagnetic (white-matter) kernel is modulated by
+    sin^2(theta) of the fibre-to-field angle (maximal perpendicular to B0, zero
+    parallel); the amplitude is the empirical kernel rather than the theoretical
+    one, so absolute anisotropic values differ from the NeuroPoly original.
 
     Parameters
     ----------
     seg : numpy.ndarray
         3D tissue segmentation labels.
     B0 : float, optional
-        Magnetic field strength in Tesla. Default is 7.
+        Magnetic field strength in Tesla. Retained for API compatibility; the
+        empirical kernel is applied field-agnostically (as chi-sep methods do),
+        so B0 does not scale the amplitude. Default is 7.
     angle_map : numpy.ndarray or None, optional
         3D map of fiber-to-field angle in degrees. Required when anisotropy=True.
     anisotropy : bool, optional
         If True, use orientation-dependent Dr_neg for white matter. Default is False.
+    dr : float, optional
+        Magnitude decay kernel in Hz/ppm. Default is DR_KERNEL (137.0).
 
     Returns
     -------
@@ -995,27 +1078,24 @@ def generate_dr_maps(seg, B0=7, angle_map=None, anisotropy=False):
     dr_neg : numpy.ndarray
         Diamagnetic relaxivity map in Hz/ppm (non-zero in white matter).
     """
-    gamma = 42.58  # MHz/T (gyromagnetic ratio / 2pi)
-
-    # Dr_pos: (2*pi)^2 * gamma * B0 / (9*sqrt(3)) for non-WM regions
-    dr_pos_value = (2 * np.pi)**2 * gamma * B0 / (9 * np.sqrt(3))
+    # Dr_pos: single kernel in the (non-WM) grey-matter regions
     non_wm_labels = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11]
 
     dr_pos = np.zeros_like(seg, dtype=np.float64)
     for label in non_wm_labels:
-        dr_pos[seg == label] = dr_pos_value
+        dr_pos[seg == label] = dr
 
     # Dr_neg: depends on anisotropy flag
     dr_neg = np.zeros_like(seg, dtype=np.float64)
     wm_mask = (seg == 8)
 
     if anisotropy and angle_map is not None:
-        # Orientation-dependent: 0.5 * gamma * 2*pi * B0 * sin^2(theta)
+        # Orientation-dependent: single kernel modulated by sin^2(theta)
         angle_rad = np.deg2rad(angle_map.astype(np.float64))
-        dr_neg[wm_mask] = 0.5 * gamma * 2 * np.pi * B0 * np.sin(angle_rad[wm_mask])**2
+        dr_neg[wm_mask] = dr * np.sin(angle_rad[wm_mask])**2
     else:
-        # Constant value for WM
-        dr_neg[wm_mask] = 700.8
+        # Isotropic single kernel for WM
+        dr_neg[wm_mask] = dr
 
     dr_neg[np.isnan(dr_neg)] = 0
 
