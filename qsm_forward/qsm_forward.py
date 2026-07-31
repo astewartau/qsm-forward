@@ -118,7 +118,7 @@ CHISEP_TISSUE_PARAMS = {
 # D_r- = 30) had no published basis. A split remains available as an explicit
 # opt-in (pass `dr_neg`) for sensitivity studies, but it is off by default.
 # -----------------------------------------------------------------------------
-DR_KERNEL = 137.0  # Hz/ppm; single-kernel susceptibility->R2' relaxivity (Shin 2022)
+DR_KERNEL = 137.0  # Hz/ppm; single-kernel susceptibility->R2' relaxivity (Shin et al. 2021, NeuroImage 240:118371)
 
 # Per-tissue T2 values at 7T in milliseconds.
 # Values from Kumar et al. (2011, 2012) J Magn Reson Imaging, scaled to 7T.
