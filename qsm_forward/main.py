@@ -57,6 +57,7 @@ def main():
         sub_parser.add_argument('--dr', default=qsm_forward.DR_KERNEL, type=float, help=f'Magnitude decay kernel (Hz/ppm) relating |chi| to R2\', single kernel for both source types (default: {qsm_forward.DR_KERNEL})')
         sub_parser.add_argument('--dr-neg', default=None, type=float, help='Optional separate diamagnetic relaxivity (Hz/ppm) to opt into a non-standard split model (default: unset = single kernel)')
         sub_parser.add_argument('--chisep-signal', nargs='?', type=argparse_bool, const=True, default=False, help='Use chi-sep-aware signal model (R2 + Dr*|chi|) instead of R2*')
+        sub_parser.add_argument('--chisep-multicompartment', nargs='?', type=argparse_bool, const=True, default=False, help='Multi-compartment GRE magnitude (|sum of para/dia/neutral compartments|) for signal-domain source separation (e.g. DECOMPOSE). Implies --chisep-signal')
         sub_parser.add_argument('--anisotropy', nargs='?', type=argparse_bool, const=True, default=False, help='Enable WM susceptibility anisotropy')
         sub_parser.add_argument('--save-r2', nargs='?', type=argparse_bool, const=True, default=False, help='Save computed R2 map')
         sub_parser.add_argument('--save-dr-pos', nargs='?', type=argparse_bool, const=True, default=False, help='Save paramagnetic relaxivity (Dr+) map')
@@ -146,6 +147,7 @@ def main():
         dr=args.dr,
         dr_neg=args.dr_neg,
         chisep_signal=args.chisep_signal,
+        chisep_multicompartment=args.chisep_multicompartment,
         anisotropy=args.anisotropy,
         save_r2=args.save_r2,
         save_dr_pos=args.save_dr_pos,
