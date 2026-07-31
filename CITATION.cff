@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "qsm-forward: A QSM forward model for simulating BIDS-compliant magnitude and phase MRI"
+abstract: >-
+  A Python API and CLI for simulating input data for Quantitative Susceptibility
+  Mapping (QSM), including BIDS-compliant magnitude and phase MRI and an optional
+  chi-separation (paramagnetic/diamagnetic) forward model.
+type: software
+authors:
+  - given-names: Ashley
+    family-names: Stewart
+    email: a.stewart.au@gmail.com
+repository-code: "https://github.com/astewartau/qsm-forward"
+url: "https://github.com/astewartau/qsm-forward"
+license: MIT
+version: "0.29"
+date-released: "2026-07-28"
+references:
+  - type: article
+    title: "QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and evaluation of susceptibility mapping procedures"
+    authors:
+      - family-names: Marques
+        given-names: "José P."
+      - family-names: Meineke
+        given-names: Jakob
+      - family-names: Milovic
+        given-names: Carlos
+    journal: "Magnetic Resonance in Medicine"
+    year: 2021
+    volume: 86
+    issue: 1
+    start: 526
+    end: 542
+    doi: "10.1002/mrm.28716"
