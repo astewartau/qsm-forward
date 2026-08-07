@@ -473,32 +473,27 @@ class TestSESignalModel:
 
 
 class TestWmAnisotropy:
-    def test_no_change_when_disabled(self):
-        chi_neg = np.ones((5, 5, 5)) * -0.04
-        seg = np.ones((5, 5, 5), dtype=np.float64) * 8
-        v1 = np.zeros((5, 5, 5, 3))
-        v1[:, :, :, 2] = 1.0  # All fibers along z
-        result = qsm_forward.generate_chisep_maps(
-            chi=np.zeros((5, 5, 5)), seg=seg,
-            mask=np.ones((5, 5, 5)), anisotropy=False
-        )
-        # Just check it runs without error
-        assert result[0].shape == (5, 5, 5)
+    def test_theta_from_v1_parallel_and_perpendicular(self):
+        # V1 parallel to B0 (z) -> theta = 0 deg; perpendicular (x) -> theta = 90 deg
+        # (faithful to PhantomCreation.m: sin^2 = (V1x^2+V1y^2)/|V1|^4)
+        v1_par = np.zeros((5, 5, 5, 3)); v1_par[:, :, :, 2] = 1.0
+        theta_par = qsm_forward.generate_theta_from_v1(v1_par, np.array([0, 0, 1]))
+        np.testing.assert_allclose(theta_par[2, 2, 2], 0.0, atol=1e-6)
+        v1_perp = np.zeros((5, 5, 5, 3)); v1_perp[:, :, :, 0] = 1.0
+        theta_perp = qsm_forward.generate_theta_from_v1(v1_perp, np.array([0, 0, 1]))
+        np.testing.assert_allclose(theta_perp[2, 2, 2], 90.0, atol=1e-6)
 
-    def test_anisotropy_cos2_modulation(self):
+    def test_anisotropy_per_tract_cos2_modulation(self):
+        # theta=0 (cos^2=1) over tract label 1 -> chi_neg = delta_chi*1 + chi_0
         chi_neg = np.ones((5, 5, 5)) * -0.04
-        seg = np.ones((5, 5, 5), dtype=np.float64) * 8
-        v1 = np.zeros((5, 5, 5, 3))
-        v1[:, :, :, 2] = 1.0  # Fibers along z = B0 direction → theta=0 → cos²=1
-        B0_dir = np.array([0, 0, 1])
+        wm_tract = np.ones((5, 5, 5), dtype=int)  # all voxels are tract label 1
+        theta = np.zeros((5, 5, 5))               # cos^2(0) = 1
         result = qsm_forward.apply_wm_anisotropy(
-            chi_neg, seg, v1, B0_dir=B0_dir, R1=None, noise_sigma=0
+            chi_neg, wm_tract, theta, R1=None, region8_r1_weighting=False
         )
-        # WM anisotropy uses the phantom's whole-WM average (delta_chi, chi_0).
-        # With theta=0: chi_neg = delta_chi * 1 + chi_0.
-        delta_chi, chi_0 = qsm_forward.WM_ANISOTROPY_PARAMS[8]
+        delta_chi, chi_0 = qsm_forward.WM_TRACT_ANISOTROPY_ARRAYS[1]
         expected = delta_chi * 1.0 + chi_0
-        np.testing.assert_allclose(result[2, 2, 2], expected, rtol=1e-10)
+        np.testing.assert_allclose(result[2, 2, 2], expected, rtol=1e-6)
 
 
 class TestReferenceValues:
@@ -522,7 +517,7 @@ class TestReferenceValues:
             11: (0.190000,  0.000000),
         }
         for label, (cp, cn) in expected.items():
-            cp_ref, cn_ref, _ = qsm_forward.CHISEP_TISSUE_PARAMS[label]
+            cp_ref, cn_ref = qsm_forward.CHISEP_TISSUE_PARAMS[label][:2]
             np.testing.assert_allclose(cp_ref, cp, atol=1e-6,
                                        err_msg=f"chi_pos mismatch label {label}")
             np.testing.assert_allclose(cn_ref, cn, atol=1e-6,
@@ -536,7 +531,7 @@ class TestReferenceValues:
             8: -0.03, 9: 0.02, 10: 0.019, 11: 0.19,
         }
         for label, net in expected_net.items():
-            cp, cn, _ = qsm_forward.CHISEP_TISSUE_PARAMS[label]
+            cp, cn = qsm_forward.CHISEP_TISSUE_PARAMS[label][:2]
             np.testing.assert_allclose(cp + cn, net, atol=1e-4,
                                        err_msg=f"net chi mismatch label {label}")
 

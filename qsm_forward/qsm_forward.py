@@ -8,15 +8,22 @@ Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in 
 phantom for MRI data simulation and evaluation of susceptibility mapping procedures.
 Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716.
 
-The chi-separation model implemented here (paramagnetic/diamagnetic susceptibility
-splitting, per-tissue chi+/chi- reference values, white-matter anisotropy, the
-T2/R2, Dr, R2', and 3T-scaling maps, and the chi-sep-aware GRE signal model) is a
-Python port of the Susceptibility-Separation-Phantom
+The chi-separation model implemented here (per-tissue paramagnetic/diamagnetic
+susceptibility construction with R1/R2* modulation, white-matter susceptibility
+anisotropy, the Dr/R2' relaxivity maps, T2/R2 and 3T-scaling maps, and the
+chi-sep-aware GRE signal model) is a Python port of the
+Susceptibility-Separation-Phantom
 (https://github.com/neuropoly/Susceptibility-Separation-Phantom), MIT licensed,
-(c) NeuroPoly 2024. Per-tissue chi+/chi- values (CHISEP_TISSUE_PARAMS) and
-white-matter anisotropy values (WM_ANISOTROPY_PARAMS / WM_TRACT_ANISOTROPY_PARAMS)
-are taken from that phantom's data/chimodel/SusceptibilityValues.mat and Tables 1-2.
-Please additionally cite:
+(c) NeuroPoly 2024. ``generate_chisep_maps`` implements PhantomCreationFunction.m:
+wavelet-denoised R1/R2*, per-tissue
+``chitemp = R2star2chi*(R2*-mean) + R12chi*(R1-mean)``, the NSTD=3 outlier clamp,
+the smooth-probability blend via ``smooth3D``, and the two-model
+``Chimap5 = W^4*Chimap3 + (1-W^4)*Chimap4`` field-gradient weighting, building
+chi+ and chi- per tissue from the base values. Per-tissue chi+/chi- values
+(CHISEP_TISSUE_PARAMS), white-matter tract anisotropy values
+(WM_TRACT_ANISOTROPY_PARAMS), and the Dr relaxivities are taken from that
+phantom's data/chimodel/SusceptibilityValues.mat, PhantomCreation.m and
+calculate_Dr.m. Please additionally cite:
 
 Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain
 phantom for quantifying susceptibility anisotropy-induced error in susceptibility
@@ -39,84 +46,65 @@ import site
 import datetime
 
 
-# Per-tissue chi-separation parameters.
-# For each tissue label: (chi_pos_ref, chi_neg_ref, iron_frac)
-#   chi_pos_ref: paramagnetic (iron) susceptibility reference (ppm, >= 0)
-#   chi_neg_ref: diamagnetic (myelin) susceptibility reference (ppm, <= 0)
-#   iron_frac: fraction of spatial chi variation attributed to iron (vs myelin)
+# Per-tissue chi-separation parameters (FAITHFUL to Ridani et al. 2026).
+# For each tissue label:
+#   (chipos, chineg, R12chipos, R2star2chipos, R12chineg, R2star2chineg)
+#     chipos/chineg      : base paramagnetic/diamagnetic susceptibility (ppm)
+#     R12chi*, R2star2chi*: per-tissue R1 / R2* modulation coefficients that add
+#                           anatomically-valid intra-tissue texture (Marques-style):
+#                             chi_component = base + R2star2chi*(R2*-mean) + R12chi*(R1-mean)
 #
-# The chi_pos_ref / chi_neg_ref values are the AUTHORITATIVE per-tissue values
-# from the Susceptibility-Separation-Phantom (Ridani, De Leener & Alonso-Ortiz,
-# 2026; MIT, (c) NeuroPoly 2024), extracted from
-#   data/chimodel/SusceptibilityValues.mat  (struct array `label`, fields
-#   `chipos` and `chineg`).
-# These correspond to Table 2 of that phantom's README (ROI-averaged chi+/chi-).
-# The label indices align 1:1 with qsm-forward's SegmentedModel / label.json
-# (verified by matching tissue names: 1=Caudate ... 11=Blood, 12=Fat, 13=Bone,
-# 14=Air, 15=Muscle, 16=Calcification).
+# ALL values are the AUTHORITATIVE per-tissue values from the
+# Susceptibility-Separation-Phantom (Ridani, De Leener & Alonso-Ortiz, 2026; MIT,
+# (c) NeuroPoly 2024), extracted at full precision from the `label` struct array in
+#   data/chimodel/SusceptibilityValues.mat
+# (fields: chipos, chineg, R12chipos, R2star2chipos, R12chineg, R2star2chineg).
+# The label indices align 1:1 with SegmentedModel / label.json (1=Caudate ...
+# 16=Calcification).
 #
-# In the phantom, chi_total(tissue) = chi_pos + chi_neg (see PhantomCreation.m
-# "Create Chi total"), so chi_pos_ref + chi_neg_ref reproduces the phantom's
-# net per-tissue chi (== the `chiref` field of the .mat for deep-GM/WM/GM).
-#
-# iron_frac controls how within-tissue spatial chi variation (delta from the
-# reference net chi) is distributed between chi+ and chi-. It is derived as
-# chi_pos_ref / (chi_pos_ref + |chi_neg_ref|) so that voxels with more total
-# chi push proportionally more signal into the paramagnetic component.
+# chi_total(tissue) = chipos + chineg (PhantomCreationFunction.m "Create Chi total").
+# chi+ and chi- are built per tissue from these base values plus the R1/R2*
+# modulation coefficients above (see generate_chisep_maps).
 CHISEP_TISSUE_PARAMS = {
-    1:  (0.052650, -0.008650, 0.859),  # Caudate nucleus
-    2:  (0.143723, -0.013223, 0.916),  # Globus pallidus
-    3:  (0.047061, -0.009061, 0.839),  # Putamen
-    4:  (0.110906, -0.010906, 0.910),  # Red nucleus
-    5:  (0.168412, -0.016412, 0.911),  # Dentate nucleus
-    6:  (0.122434, -0.011434, 0.915),  # Substantia nigra & subthalamic nucleus
-    7:  (0.050904, -0.030904, 0.622),  # Thalamus
-    8:  (0.005900, -0.035900, 0.141),  # White matter — myelin-dominant
-    9:  (0.039182, -0.019182, 0.671),  # Gray matter
-    10: (0.027512, -0.008512, 0.764),  # CSF
-    11: (0.190000,  0.000000, 1.000),  # Blood — deoxyhemoglobin (paramagnetic)
-    12: (0.038000, -0.019000, 0.667),  # Fat
-    13: (-2.100000, -4.200000, 0.000),  # Bone (diamagnetic; chi_pos also < 0)
-    14: (18.400000, -9.200000, 0.667),  # Air
-    # Muscle (15) and Calcification (16) are 0 in SusceptibilityValues.mat;
-    # calcification's strong diamagnetism is modelled directly in the base chi
-    # map rather than via the separation reference values.
-    15: (0.000000,  0.000000, 1.000),  # Muscle
-    16: (0.000000,  0.000000, 1.000),  # Calcification
+    1:  (0.05265,      -0.00865,      -0.0119,    0.0011,                 -0.0119,    0.0),                     # Caudate nucleus
+    2:  (0.143722992,  -0.013222992,  -0.0257,    0.0008428,              -0.0257,    0.0),                     # Globus pallidus
+    3:  (0.047061074,  -0.009061074,  -0.0249,    0.0019,                  0.0249,    0.0),                     # Putamen
+    4:  (0.110905893,  -0.010905893,  -0.0444,    0.00178,                -0.0444,    0.00178),                 # Red nucleus
+    5:  (0.168411781,  -0.016411781,  -0.0639,    0.0017077,              -0.0639,    0.0017077),               # Dentate nucleus
+    6:  (0.122433878,  -0.011433878,  -0.075,     0.0014913,              -0.075,     0.0014913),               # Substantia nigra & subthalamic nucleus
+    7:  (0.050903658,  -0.030903658,  -0.0861799, 0.0012748418375849724,  -0.0861799, 0.0012748418375849724),  # Thalamus
+    8:  (0.0059,       -0.0359,       -0.078,     0.0,                    -0.078,     0.0011),                   # White matter
+    9:  (0.039182053,  -0.019182053,  -0.0947979, 0.001402326044626534,   -0.0947979, 0.001402326044626534),   # Gray matter
+    10: (0.027511641,  -0.008511641,  -0.0063624, 6.671431037830189e-05,  -0.0063624, 6.671431037830189e-05),  # CSF
+    11: (0.19,          0.0,          -0.0582219, 4.701104626292363e-05,  -0.0582219, 4.701104626292363e-05),   # Blood — deoxyhemoglobin
+    12: (0.038,        -0.019,         0.0,       0.0,                     0.0,       0.0),                      # Fat
+    13: (-2.1,         -4.2,           1.2690799849224277e-05, 2.8707299293273536e-07, 1.2690799849224277e-05, 2.8707299293273536e-07),  # Bone
+    14: (18.4,         -9.2,          -3.100334140526684e-07, 3.241496404626787e-09, -3.100334140526684e-07, 3.241496404626787e-09),     # Air
+    15: (0.0,           0.0,          -1.5497382264584303e-05, 4.508940776304371e-07, -1.5497382264584303e-05, 4.508940776304371e-07),   # Muscle
+    16: (0.0,           0.0,           0.0,       0.0,                     0.0,       0.0),                      # Calcification
 }
 
 # -----------------------------------------------------------------------------
 # Susceptibility -> R2' relaxivity ("magnitude decay kernel", D_r).
 #
-# The chi-separation biophysical model (Shin et al., NeuroImage 2021) treats
-# susceptibility sources as uniformly magnetised spheres in the static-dephasing
-# regime, which yields a SINGLE, spatially-invariant magnitude decay kernel that
-# relates R2' to the ABSOLUTE susceptibility of BOTH source types:
+# In the static-dephasing regime (Yablonskiy & Haacke, 1994), reversible
+# transverse relaxation depends on the magnitude of the susceptibility-induced
+# field perturbation, not its sign. A single spatially-invariant kernel then
+# relates R2' to the absolute susceptibility of both source types:
 #
 #     R2' = D_r * (|chi_pos| + |chi_neg|)
 #
-# i.e. paramagnetic (iron) and diamagnetic (myelin) sources share one relaxivity
-# -- dephasing depends on the magnitude of the field perturbation, not its sign.
-# This is the convention used by every published chi-separation method we know of
-# (chi-sep iLSQR/MEDI, chi-sepnet, SUSEP-Net, APART-QSM, WaveSep) and by the
-# forward model of Stoll (2025), which we follow.
+# so paramagnetic (iron) and diamagnetic (myelin) sources share one relaxivity.
+# DR_KERNEL = 137 Hz/ppm is the empirically calibrated value of Shin et al.
+# (NeuroImage 2021); the COSMOS-referenced value of 114 Hz/ppm (chi-sepnet) is an
+# equivalent single-kernel estimate that differs by the QSM algorithm used to
+# calibrate it.
 #
-# We use D_r = 137 Hz/ppm, the empirically measured value from Shin et al.'s
-# multi-orientation chi-separation work (2022). The COSMOS-referenced value of
-# 114 Hz/ppm (chi-sepnet; R^2 = 0.93) is an equivalent single-kernel estimate
-# that differs only by the QSM algorithm used to calibrate it.
-#
-# A SPLIT model (distinct D_r+ for iron and D_r- for myelin) is deliberately NOT
-# the default. Real tissue microstructure (spherical ferritin vs anisotropic
-# cylindrical myelin, different diffusion regimes) plausibly does give the two
-# source types different EFFECTIVE relaxivities, but: (a) the split is not
-# recoverable from the data -- with one QSM + one R2' map the relaxivities must
-# be assumed a priori, not estimated -- so encoding a specific split into the
-# ground truth mainly rewards whichever method shares that exact assumption;
-# (b) no widely-used chi-separation method or reference phantom adopts a split;
-# and (c) the particular split we previously defaulted to (D_r+ = 114,
-# D_r- = 30) had no published basis. A split remains available as an explicit
-# opt-in (pass `dr_neg`) for sensitivity studies, but it is off by default.
+# generate_dr_maps_ridani() provides the alternative source-dependent,
+# orientation-dependent relaxivities (D_r+ spherical, D_r- cylindrical sin^2(θ);
+# Yablonskiy & Haacke 1994, as used by Ridani et al. 2026), which generate_r2prime
+# and generate_bids accept as spatially-varying maps. A scalar split (distinct
+# D_r+/D_r-) is also available via the ``dr_neg`` argument.
 # -----------------------------------------------------------------------------
 DR_KERNEL = 137.0  # Hz/ppm; single-kernel susceptibility->R2' relaxivity (Shin et al. 2021, NeuroImage 240:118371)
 
@@ -154,43 +142,22 @@ R1_3T_DIVISION_FACTORS = {
     11: 0.75672,  # Blood
 }
 
-# White matter susceptibility anisotropy parameters.
-# For each WM label: (delta_chi, chi_0) in ppm, where
+# White matter susceptibility anisotropy parameters (per WM tract).
+# For each WM-tract label in white_matter_mask.nii.gz: (delta_chi, chi_0) in ppm,
+# where the apparent (orientation-dependent) diamagnetic susceptibility is
 #   chi_neg_aniso = delta_chi * cos^2(theta) + chi_0
-# and theta is the angle between fiber orientation (V1) and B0.
+# and theta is the angle between the fibre orientation (V1) and B0.
 #
-# delta_chi (= chi_parallel - chi_perp) and chi_0 are the AUTHORITATIVE per-WM-tract
-# values from the Susceptibility-Separation-Phantom (Ridani, De Leener &
-# Alonso-Ortiz, 2026; MIT, (c) NeuroPoly 2024), Table 1 of that phantom's README,
-# encoded numerically in PhantomCreation.m (deltaX_values / Xzero_values):
-#
-#   Body of corpus callosum              : delta_chi=+0.032, chi_0=-0.0512
-#   Splenium of corpus callosum          : delta_chi=+0.024, chi_0=-0.0522
-#   Genu of corpus callosum              : delta_chi=+0.014, chi_0=-0.0382
-#   Anterior limb of internal capsule    : delta_chi=+0.016, chi_0=-0.0512
-#   Posterior thalamic radiations        : delta_chi=+0.016, chi_0=-0.0592
-#   Superior corona radiata              : delta_chi=+0.005, chi_0=-0.0442
-#   Posterior corona radiata             : delta_chi=+0.008, chi_0=-0.0542
-#   Anterior corona radiata              : delta_chi=+0.006, chi_0=-0.0462
-#   Posterior limb of internal capsule   : delta_chi=-0.015, chi_0=-0.0382
-#   Superior longitudinal fascicle       : delta_chi=-0.015, chi_0=-0.0372
-#
-# NOTE ON LABEL MAPPING: the phantom applies these per WM sub-tract using a
-# separate white_matter_mask.nii.gz (10 labelled tracts). qsm-forward's
-# SegmentedModel has only a single generic WM label (8) and no tract
-# sub-segmentation, so we cannot key anisotropy per-tract here without that map.
-# The default below uses whole-WM average values consistent with the phantom's
-# Table 2 (chi- with anisotropy averages ~-0.034 across WM, from chi_0 ~-0.0462
-# and delta_chi ~+0.010). If a per-tract WM sub-segmentation is supplied, extend
-# this dict with the tract labels and their (delta_chi, chi_0) values above.
-WM_ANISOTROPY_PARAMS = {
-    8: (0.010, -0.0462),  # Generic white matter (whole-WM average of Table 1 tracts)
-}
-
-# Per-WM-tract anisotropy values (delta_chi, chi_0) in ppm, keyed by tract.
-# Not directly applicable to qsm-forward's single WM label (8) unless a WM
-# sub-segmentation is provided; retained here as the authoritative reference
-# (Susceptibility-Separation-Phantom Table 1 / PhantomCreation.m).
+# delta_chi (= chi_parallel - chi_perp) and chi_0 are the per-WM-tract values from
+# the Susceptibility-Separation-Phantom (Ridani, De Leener & Alonso-Ortiz, 2026;
+# MIT, (c) NeuroPoly 2024), Table 1 of that phantom's README, encoded numerically
+# in PhantomCreation.m as:
+#   deltaX_values = [0.032, 0.024, 0.014, 0.016, 0.016, 0.005, 0.008, 0.006, -0.015, -0.015, 0.0091]
+#   Xzero_values  = [-0.0512,-0.0522,-0.0382,-0.0512,-0.0592,-0.0442,-0.0542,-0.0462,-0.0382,-0.0372,-0.0385]
+# applied over white_matter_mask labels 1..11. WM_TRACT_ANISOTROPY_PARAMS below is
+# a labelled view of these values; WM_TRACT_ANISOTROPY_ARRAYS is the index-keyed
+# (label 1..11) form used by apply_wm_anisotropy, which applies them per-tract over
+# the supplied white_matter_mask as in PhantomCreation.m.
 WM_TRACT_ANISOTROPY_PARAMS = {
     'body_corpus_callosum':            (0.032, -0.0512),
     'splenium_corpus_callosum':        (0.024, -0.0522),
@@ -202,6 +169,23 @@ WM_TRACT_ANISOTROPY_PARAMS = {
     'anterior_corona_radiata':         (0.006, -0.0462),
     'posterior_limb_internal_capsule': (-0.015, -0.0382),
     'superior_longitudinal_fascicle':  (-0.015, -0.0372),
+    'tract_11':                        (0.0091, -0.0385),
+}
+
+# Index-keyed (white_matter_mask label 1..11 -> (delta_chi, chi_0)) view of the
+# authoritative deltaX_values/Xzero_values arrays from PhantomCreation.m.
+WM_TRACT_ANISOTROPY_ARRAYS = {
+    1:  (0.032, -0.0512),
+    2:  (0.024, -0.0522),
+    3:  (0.014, -0.0382),
+    4:  (0.016, -0.0512),
+    5:  (0.016, -0.0592),
+    6:  (0.005, -0.0442),
+    7:  (0.008, -0.0542),
+    8:  (0.006, -0.0462),
+    9:  (-0.015, -0.0382),
+    10: (-0.015, -0.0372),
+    11: (0.0091, -0.0385),
 }
 
 
@@ -276,9 +260,14 @@ class TissueParams:
             chi_neg = None,
             voxel_size = None,
             apply_mask = False,
-            v1 = None,
+            v1 = "maps/V1.nii.gz",
             R2 = None,
             angle_map = None,
+            raw_field = "raw/rawField.nii.gz",
+            high_grad = "masks/highgrad.nii.gz",
+            white_matter_mask = "masks/white_matter_mask.nii.gz",
+            chisep_anisotropy = False,
+            chisep_apply_brain_mask = True,
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
             raise ValueError(f"Path to chi is invalid! ({os.path.join(root_dir, chi)})")
@@ -293,6 +282,15 @@ class TissueParams:
         self._v1 = os.path.join(root_dir, v1) if isinstance(v1, str) and os.path.exists(os.path.join(root_dir, v1)) else v1 if not isinstance(v1, str) else None
         self._R2 = os.path.join(root_dir, R2) if isinstance(R2, str) and os.path.exists(os.path.join(root_dir, R2)) else R2 if not isinstance(R2, str) else None
         self._angle_map = os.path.join(root_dir, angle_map) if isinstance(angle_map, str) and os.path.exists(os.path.join(root_dir, angle_map)) else angle_map if not isinstance(angle_map, str) else None
+        # Extra maps for the chi-sep build. String paths are
+        # resolved relative to root_dir if they exist; otherwise kept as the raw
+        # value (arrays) or set to None (missing optional path). Missing required
+        # maps are reported by _compute_chisep_maps, not silently defaulted.
+        self._raw_field = os.path.join(root_dir, raw_field) if isinstance(raw_field, str) and os.path.exists(os.path.join(root_dir, raw_field)) else raw_field if not isinstance(raw_field, str) else None
+        self._high_grad = os.path.join(root_dir, high_grad) if isinstance(high_grad, str) and os.path.exists(os.path.join(root_dir, high_grad)) else high_grad if not isinstance(high_grad, str) else None
+        self._white_matter_mask = os.path.join(root_dir, white_matter_mask) if isinstance(white_matter_mask, str) and os.path.exists(os.path.join(root_dir, white_matter_mask)) else white_matter_mask if not isinstance(white_matter_mask, str) else None
+        self._chisep_anisotropy = chisep_anisotropy
+        self._chisep_apply_brain_mask = chisep_apply_brain_mask
         self._apply_mask = apply_mask
         self._voxel_size = voxel_size
         self._affine = None
@@ -367,14 +365,63 @@ class TissueParams:
             return None
         return self._load(self._angle_map) if isinstance(self._angle_map, str) else nib.Nifti1Image(self._angle_map, affine=self.nii_affine, header=self.nii_header)
 
+    @property
+    def raw_field(self):
+        if self._raw_field is None:
+            return None
+        return self._load(self._raw_field) if isinstance(self._raw_field, str) else nib.Nifti1Image(self._raw_field, affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def high_grad(self):
+        if self._high_grad is None:
+            return None
+        return self._load(self._high_grad) if isinstance(self._high_grad, str) else nib.Nifti1Image(self._high_grad, affine=self.nii_affine, header=self.nii_header)
+
+    @property
+    def white_matter_mask(self):
+        if self._white_matter_mask is None:
+            return None
+        return self._load(self._white_matter_mask) if isinstance(self._white_matter_mask, str) else nib.Nifti1Image(self._white_matter_mask, affine=self.nii_affine, header=self.nii_header)
+
     def _compute_chisep_maps(self):
-        """Compute and cache tissue-informed chi+ and chi- maps."""
-        chi_data = self.chi.get_fdata()
+        """Build and cache chi+ / chi- maps via generate_chisep_maps.
+
+        Requires the R1, R2*, raw field and high-gradient maps (and, for
+        anisotropy, V1 + white_matter_mask). Missing required maps raise a clear
+        error naming the file — there is no silent fallback.
+        """
+        missing = []
+        if self.raw_field is None:
+            missing.append("raw_field (masks/raw/rawField.nii.gz)")
+        if self.high_grad is None:
+            missing.append("high_grad (masks/highgrad.nii.gz)")
+        anisotropy = bool(self._chisep_anisotropy)
+        if anisotropy:
+            if self.v1 is None:
+                missing.append("v1 (maps/V1.nii.gz)")
+            if self.white_matter_mask is None:
+                missing.append("white_matter_mask (masks/white_matter_mask.nii.gz)")
+        if missing:
+            raise FileNotFoundError(
+                "generate_chisep_maps needs these maps, "
+                "which are missing: " + ", ".join(missing)
+            )
+
         seg_data = self.seg.get_fdata()
         mask_data = self.mask.get_fdata()
+        R1_data = self.R1.get_fdata()
+        R2star_data = self.R2star.get_fdata()
+        raw_field_data = self.raw_field.get_fdata()
+        high_grad_data = self.high_grad.get_fdata()
+        v1_data = self.v1.get_fdata() if (anisotropy and self.v1 is not None) else None
+        wm_tract_data = self.white_matter_mask.get_fdata() if (anisotropy and self.white_matter_mask is not None) else None
+
         cp, cn = generate_chisep_maps(
-            chi_data, seg_data, mask_data,
-            voxel_size=self.voxel_size
+            seg=seg_data, mask=mask_data, R1=R1_data, R2star=R2star_data,
+            raw_field=raw_field_data, high_grad=high_grad_data,
+            voxel_size=self.voxel_size,
+            v1_map=v1_data, wm_tract_mask=wm_tract_data, anisotropy=anisotropy,
+            apply_brain_mask=bool(self._chisep_apply_brain_mask),
         )
         self._cached_chi_pos = nib.Nifti1Image(cp, affine=self.nii_affine, header=self.nii_header)
         self._cached_chi_neg = nib.Nifti1Image(cn, affine=self.nii_affine, header=self.nii_header)
@@ -512,7 +559,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, chisep_signal=False, chisep_multicompartment=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -553,6 +600,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         Optional separate diamagnetic relaxivity in Hz/ppm. None (default) uses the
         single kernel ``dr`` for both source types; pass a value to opt into a
         non-standard split model for the R2' map AND the chi-sep signal.
+    dr_pos_map, dr_neg_map : numpy.ndarray or None
+        Optional caller-supplied spatially-varying paramagnetic/diamagnetic relaxivity
+        maps (Hz/ppm), e.g. an anisotropic (orientation-dependent) split Dr. When given
+        they take precedence over the scalar ``dr``/``dr_neg`` and over the built-in
+        ``anisotropy`` path, and drive both the shipped R2' map and the GRE signal decay
+        so the two are consistent. Either may be None to keep the scalar kernel for that
+        source type.
     save_se : bool
         Whether to save a simulated multi-echo spin-echo (SE) acquisition, whose
         magnitude decays with R2 (not R2*). Enables deriving R2' = R2* - R2 from
@@ -618,7 +672,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             nib.save(resize(chi_neg_abs_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-neg.nii"))
         if save_r2prime:
             print("Computing R2' from chi+ and chi-...")
-            r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr=dr, dr_neg=dr_neg)
+            # Provided spatially-varying Dr maps (e.g. anisotropic split relaxivity) take precedence
+            # over the scalar dr/dr_neg, and are used here AND in the signal below so the shipped R2'
+            # and the GRE decay stay consistent.
+            rp_pos = dr if dr_pos_map is None else dr_pos_map
+            rp_neg = (dr if dr_neg is None else dr_neg) if dr_neg_map is None else dr_neg_map
+            r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr=rp_pos, dr_neg=rp_neg)
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
             nib.save(resize(r2prime_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
@@ -685,7 +744,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         # (dr_pos*|chi+| + dr_neg*|chi-|) IDENTICAL to generate_r2prime and, with
         # the SE R2 decay, to the derivable R2' = R2* - R2. anisotropy is an
         # opt-in that swaps in a spatially-varying orientation-dependent map.
-        if anisotropy and tissue_params.angle_map is not None:
+        if dr_pos_map is not None or dr_neg_map is not None:
+            # Caller-supplied spatially-varying split relaxivity (same maps used for the shipped R2').
+            print("  Using provided spatially-varying Dr maps...")
+            dr_pos_data = dr if dr_pos_map is None else dr_pos_map
+            dr_neg_data = (dr if dr_neg is None else dr_neg) if dr_neg_map is None else dr_neg_map
+        elif anisotropy and tissue_params.angle_map is not None:
             print("  Computing orientation-dependent Dr maps (anisotropy=True)...")
             dr_pos_data, dr_neg_data = generate_dr_maps(
                 seg=tissue_params.seg.get_fdata(),
@@ -701,12 +765,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if save_dr_pos or save_dr_neg:
             # Broadcast scalar kernels to masked constant maps for saving
             mask_data = tissue_params.mask.get_fdata()
-            dr_pos_map = dr_pos_data if np.ndim(dr_pos_data) else dr_pos_data * mask_data
-            dr_neg_map = dr_neg_data if np.ndim(dr_neg_data) else dr_neg_data * mask_data
+            dr_pos_save = dr_pos_data if np.ndim(dr_pos_data) else dr_pos_data * mask_data
+            dr_neg_save = dr_neg_data if np.ndim(dr_neg_data) else dr_neg_data * mask_data
             if save_dr_pos:
-                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_pos_map, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
+                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_pos_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
             if save_dr_neg:
-                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_neg_map, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
+                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_neg_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
 
     # signal model
     multiecho = len(recon_params.TEs) > 1
@@ -1107,6 +1171,73 @@ def generate_dr_maps(seg, B0=7, angle_map=None, anisotropy=False, dr=DR_KERNEL):
     return dr_pos, dr_neg
 
 
+def generate_dr_maps_ridani(seg, theta, B0=7, anisotropic=True, dr_fixed=None):
+    """
+    Generate the paramagnetic/diamagnetic R2' relaxivity (Dr) maps (calculate_Dr.m).
+
+    Paramagnetic (Dr_pos), non-WM regions [1,2,3,4,5,6,7,9,10,11]:
+        Dr_pos = (2*pi * 2*pi * 42.58 * B0) / (9*sqrt(3))
+    (0 in WM label 8, 0 elsewhere).
+
+    Diamagnetic (Dr_neg), WM label 8:
+        anisotropic=True  : Dr_neg = 0.5 * 42.58 * 2*pi * B0 * sin(theta_rad)^2
+        anisotropic=False : Dr_neg = 700.8 (the constant option in calculate_Dr.m)
+
+    NOTE: calculate_Dr.m hard-codes B0=7 in the numeric constants; ``B0`` here
+    scales those expressions the same way the formulae are written, so B0=7
+    reproduces the MATLAB exactly.
+
+    Parameters
+    ----------
+    seg : numpy.ndarray
+        3D SegmentedModel labels.
+    theta : numpy.ndarray
+        3D fibre-to-field angle map in degrees (generate_theta_from_v1); used only
+        for the anisotropic Dr_neg.
+    B0 : float
+        Field strength in Tesla. Default 7 (matches calculate_Dr.m constants).
+    anisotropic : bool
+        If True, WM Dr_neg is the sin^2(theta) variable form; if False, the 700.8
+        constant form. Default True.
+    dr_fixed : float or None
+        If given, both maps are rescaled so the paramagnetic relaxivity equals
+        ``dr_fixed`` Hz/ppm (field-independent), preserving the sin^2(theta) shape.
+        If None (default), the field-scaled static-dephasing magnitudes are used.
+
+    Returns
+    -------
+    dr_pos_map : numpy.ndarray
+        Paramagnetic relaxivity map (Hz).
+    dr_neg_map : numpy.ndarray
+        Diamagnetic relaxivity map (Hz).
+    """
+    seg = np.asarray(seg, dtype=np.float64)
+    regions_to_modify = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11]
+
+    value_positive = (2 * np.pi * 2 * np.pi * 42.58 * B0) / (9 * np.sqrt(3))
+    dr_pos_map = np.zeros_like(seg)
+    for region in regions_to_modify:
+        dr_pos_map[seg == region] = value_positive
+    dr_pos_map[seg == 8] = 0
+
+    wm = (seg == 8)
+    dr_neg_map = np.zeros_like(seg)
+    if anisotropic:
+        theta = np.asarray(theta, dtype=np.float64)
+        drneg = 0.5 * 42.58 * 2 * np.pi * B0 * np.sin(np.deg2rad(theta)) ** 2
+        drneg[np.isnan(drneg)] = 0
+        dr_neg_map[wm] = drneg[wm]
+    else:
+        dr_neg_map[wm] = 700.8
+
+    if dr_fixed is not None:
+        scale = dr_fixed / value_positive
+        dr_pos_map = dr_pos_map * scale
+        dr_neg_map = dr_neg_map * scale
+
+    return dr_pos_map, dr_neg_map
+
+
 def scale_maps_to_3t(R2, R2star, R1, seg, T2=None):
     """
     Scale tissue parameter maps from 7T to 3T field strength.
@@ -1150,212 +1281,592 @@ def scale_maps_to_3t(R2, R2star, R1, seg, T2=None):
     return result
 
 
-def apply_wm_anisotropy(chi_neg, seg, v1_map, B0_dir=np.array([0, 0, 1]),
-                         wm_params=None, R1=None, noise_sigma=0.01):
+# -----------------------------------------------------------------------------
+# Faithful helpers ported from the Susceptibility-Separation-Phantom MATLAB utils
+# (func/utils/{smooth3D.m, gradient_3D.m, sos.m, WaveletDenoising/Wavedec3Denoising.m}).
+# -----------------------------------------------------------------------------
+
+def smooth3d_fft(X, fwhm, vox=(1, 1, 1)):
     """
-    Apply white matter susceptibility anisotropy to the diamagnetic susceptibility map.
+    3D Gaussian smoothing via FFT, port of smooth3D.m.
 
-    Models chi- in white matter as orientation-dependent:
-        chi_neg = delta_chi * cos^2(theta) + chi_0
-    where theta is the angle between fiber orientation (V1) and B0 direction.
-
-    Translated from NeuroPoly Susceptibility-Separation-Phantom PhantomCreation.m.
+    dev = FWHM/2.35; the Gaussian is centred on an ndgrid of physical coordinates
+    ((-dim/2 : dim/2-1)*vox) and normalised by ``sum(abs(GAUSS))`` before an
+    FFT-domain multiply. Both the image and the kernel are transformed with an
+    unshifted fftn (``fft3s``/``ifft3s`` in the MATLAB), so the returned array
+    matches MATLAB's ``real(smooth3D(...))`` usage.
 
     Parameters
     ----------
-    chi_neg : numpy.ndarray
-        3D diamagnetic susceptibility map (<= 0, ppm). Modified in WM regions.
-    seg : numpy.ndarray
-        3D tissue segmentation labels.
-    v1_map : numpy.ndarray
-        4D array (x, y, z, 3) of primary eigenvector from diffusion tensor.
-    B0_dir : numpy.ndarray, optional
-        Direction of B0 field (3-element vector). Default is [0, 0, 1].
-    wm_params : dict or None, optional
-        Per-WM-label anisotropy parameters: {label: (delta_chi, chi_0)}.
-        Default uses WM_ANISOTROPY_PARAMS.
-    R1 : numpy.ndarray or None, optional
-        3D R1 map for texture modulation. If None, no texture noise is added.
-    noise_sigma : float, optional
-        Standard deviation for R1-weighted Gaussian noise. Default is 0.01.
+    X : numpy.ndarray
+        3D input volume.
+    fwhm : float
+        Full width at half maximum in mm.
+    vox : sequence of float
+        Voxel size in mm (3-element).
 
     Returns
     -------
     numpy.ndarray
-        Modified chi_neg array with anisotropic WM susceptibility.
+        Smoothed volume (real part), same shape as X.
     """
-    if wm_params is None:
-        wm_params = WM_ANISOTROPY_PARAMS
+    X = np.asarray(X, dtype=np.float64)
+    dim = X.shape
+    # ndgrid coordinates: (-n/2 : n/2-1) * vox, matching MATLAB smooth3D.m exactly.
+    axes = [(np.arange(-d / 2, d / 2)) * v for d, v in zip(dim, vox)]
+    X1, X2, X3 = np.meshgrid(axes[0], axes[1], axes[2], indexing='ij')
+    dev = fwhm / 2.35
+    gauss = np.exp(-(X1 ** 2 + X2 ** 2 + X3 ** 2) / (2 * dev ** 2))
+    gauss = gauss / np.sum(np.abs(gauss))
+    # MATLAB smooth3D uses fft3s = fftshift(fft(ifftshift(x))): the ifftshift moves the
+    # centre-peaked Gaussian to the array ORIGIN so the convolution introduces NO spatial
+    # shift. Working this through, S = ifftn(fftn(X) * fftn(ifftshift(gauss))). Omitting the
+    # ifftshift convolves with a centre-peaked kernel and shifts the result by dim/2 in every
+    # axis (the bug that zeroed the smooth-branch tissues); the ifftshift below fixes it.
+    S = np.fft.ifftn(np.fft.fftn(X) * np.fft.fftn(np.fft.ifftshift(gauss)))
+    return np.real(S)
 
-    chi_neg = chi_neg.copy()
+
+def gradient_3d_midpoint(I, res=(1, 1, 1)):
+    """
+    Midpoint (central-difference) 3D gradient, port of gradient_3D.m
+    method 0 (the default). One-sided differences at the two boundary planes
+    along each axis, central differences in the interior, each divided by the
+    corresponding voxel size in ``res``.
+
+    Parameters
+    ----------
+    I : numpy.ndarray
+        3D input volume.
+    res : sequence of float
+        Voxel size in mm (3-element).
+
+    Returns
+    -------
+    (dx, dy, dz) : tuple of numpy.ndarray
+        Gradient components along each axis.
+    """
+    I = np.asarray(I, dtype=np.float64)
+
+    def _grad_axis(A, axis):
+        g = np.empty_like(A)
+        sl = [slice(None)] * A.ndim
+
+        def s(a, b=None):
+            idx = list(sl)
+            idx[axis] = slice(a, b)
+            return tuple(idx)
+
+        def si(i):
+            idx = list(sl)
+            idx[axis] = i
+            return tuple(idx)
+
+        # first plane: I(2)-I(1)
+        g[si(0)] = A[si(1)] - A[si(0)]
+        # interior: 0.5*(I(k+1)-I(k-1))
+        g[s(1, -1)] = 0.5 * (A[s(2, None)] - A[s(0, -2)])
+        # last plane: I(end)-I(end-1)
+        g[si(-1)] = A[si(-1)] - A[si(-2)]
+        return g
+
+    dx = _grad_axis(I, 0) / res[0]
+    dy = _grad_axis(I, 1) / res[1]
+    dz = _grad_axis(I, 2) / res[2]
+    return dx, dy, dz
+
+
+def sos(x, dim=-1, pnorm=2):
+    """
+    Square root of the sum of squares along an axis, port of sos.m.
+
+        res = (sum(|x|^pnorm, dim))^(1/pnorm)
+
+    Default reduces over the last axis with pnorm=2.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    return (np.sum(np.abs(x) ** pnorm, axis=dim)) ** (1.0 / pnorm)
+
+
+def wavelet_denoise(inmat, threshold, level, wavelet, method, mask=None):
+    """
+    Wavelet-domain denoising, port of Wavedec3Denoising.m.
+
+    Uses pywt.wavedecn / waverecn (db2, ``level`` levels) and applies a
+    hard / soft / verysoft threshold to every detail (and approximation) band,
+    with the optional mask-weighting logic from the MATLAB (a band coefficient is
+    only eligible for thresholding where the all-ones decomposition is NOT much
+    larger than the mask decomposition, i.e. away from the mask's own edges).
+
+    NOTE: pywt is algorithmically equivalent to MATLAB wavedec3, not
+    byte-identical (different boundary handling / coefficient ordering), so the
+    denoised output matches the MATLAB in behaviour but not bit-for-bit.
+
+    Parameters
+    ----------
+    inmat : numpy.ndarray
+        3D input volume.
+    threshold : float
+        Threshold (same units as the wavelet coefficients).
+    level : int
+        Number of decomposition levels (MATLAB L; the phantom uses 8).
+    wavelet : str
+        Wavelet name (the phantom uses 'db2').
+    method : str
+        'hard', 'soft', or 'verysoft'.
+    mask : numpy.ndarray or None
+        Optional weighting mask (same shape as inmat). Matches the MATLAB
+        varargin{1} mask-weighting term.
+
+    Returns
+    -------
+    numpy.ndarray
+        Denoised volume (complex-capable; callers take abs(real(.))).
+    """
+    import pywt  # lazy import
+
+    inmat = np.asarray(inmat, dtype=np.float64)
+    coeffs = pywt.wavedecn(inmat, wavelet, level=level)
+
+    # Build the per-band mask weighting (w_mask.dec) as in the MATLAB: for each
+    # band, compare the wavedec of ones(size) against the wavedec of the mask.
+    wmask = None
+    if mask is not None:
+        mask = np.asarray(mask, dtype=np.float64)
+        cmask = pywt.wavedecn(mask, wavelet, level=level)
+        cones = pywt.wavedecn(np.ones_like(mask), wavelet, level=level)
+        wmask = []
+        for cm, co in zip(cmask, cones):
+            if isinstance(cm, dict):
+                wm = {}
+                for key in cm:
+                    m = cm[key]
+                    o = co[key]
+                    w = np.ones_like(o)
+                    w[np.abs(o) > 1.1 * np.abs(m)] = 0
+                    w[np.abs(o) <= 1.1 * np.abs(m)] = 1
+                    w[np.abs(m) < 0.01] = 1
+                    wm[key] = w
+                wmask.append(wm)
+            else:
+                m = cm
+                o = co
+                w = np.ones_like(o)
+                w[np.abs(o) > 1.1 * np.abs(m)] = 0
+                w[np.abs(o) <= 1.1 * np.abs(m)] = 1
+                w[np.abs(m) < 0.01] = 1
+                wmask.append(w)
+
+    # Global max over all bands (for the 'verysoft' rescale factor). The MATLAB
+    # computes max(abs(y_r.dec{k}(:))) per band k.
+    def _threshold_band(band, wband):
+        band = band.astype(np.complex128)
+        w = np.ones_like(band, dtype=bool) if wband is None else (wband != 0)
+        below = (np.abs(band) < threshold) & w
+        keep = ~((np.abs(band) < threshold) & w)
+        if method == 'hard':
+            band[below] = 0
+        elif method == 'soft':
+            band[below] = 0
+            ang = np.angle(band[keep])
+            band[keep] = band[keep] - np.exp(1j * ang) * threshold
+        elif method == 'verysoft':
+            band[below] = 0
+            mx = np.max(np.abs(band)) if band.size else 0.0
+            denom = (mx - threshold)
+            if denom != 0:
+                ang = np.angle(band[keep])
+                band[keep] = mx / denom * (band[keep] - np.exp(1j * ang) * threshold)
+        else:
+            raise ValueError(f"Unknown wavelet denoising method: {method}")
+        return band
+
+    for i, band in enumerate(coeffs):
+        wband_group = wmask[i] if wmask is not None else None
+        if isinstance(band, dict):
+            for key in band:
+                wband = wband_group[key] if wband_group is not None else None
+                band[key] = _threshold_band(band[key], wband)
+        else:
+            coeffs[i] = _threshold_band(band, wband_group)
+
+    out = pywt.waverecn(coeffs, wavelet)
+    # waverecn may pad by one sample per level; crop back to input shape.
+    slices = tuple(slice(0, s) for s in inmat.shape)
+    return out[slices]
+
+
+def generate_theta_from_v1(v1, B0_dir=np.array([0, 0, 1]), mask=None):
+    """
+    Compute the fibre-to-field angle theta (degrees) from the primary eigenvector
+    V1, port of the PhantomCreation.m "Theta" block.
+
+    The MATLAB uses (with B0 along z, i.e. the in-plane components are 1:2):
+        numerator   = sum(V1(:,:,:,1:2).^2, 4)
+        denominator = sum(V1.^2, 4).^2      % NOTE: the denominator is SQUARED
+        sin2        = numerator ./ denominator
+        theta       = asin(sqrt(sin2)) * 180/pi
+
+    This reproduces that expression EXACTLY, including the squared denominator
+    (a quirk of the original code). The "in-plane" components are taken as those
+    perpendicular to ``B0_dir``; for the default z-oriented B0 these are the x,y
+    components, matching V1(:,:,:,1:2).
+
+    Parameters
+    ----------
+    v1 : numpy.ndarray
+        4D array (x, y, z, 3) of the primary eigenvector.
+    B0_dir : numpy.ndarray
+        B0 direction (3-element). Default [0, 0, 1].
+    mask : numpy.ndarray or None
+        Optional 3D ROI mask; V1 is zeroed outside it before the computation
+        (matching the MATLAB roi_mask multiply). If None, the whole volume is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        theta in degrees (3D). NaNs (from zero-norm voxels) are left as produced,
+        as in the MATLAB (they are handled downstream).
+    """
+    v1 = np.asarray(v1, dtype=np.float64)
+    B0_dir = np.asarray(B0_dir, dtype=np.float64)
     B0_dir = B0_dir / np.linalg.norm(B0_dir)
 
-    for label, (delta_chi, chi_0) in wm_params.items():
-        wm_mask = (seg == label)
-        if not wm_mask.any():
+    if mask is not None:
+        v1 = v1 * (mask[..., None] != 0)
+
+    # component index parallel to B0 (the "z" axis in the default case)
+    par_axis = int(np.argmax(np.abs(B0_dir)))
+    perp_axes = [a for a in range(3) if a != par_axis]
+
+    numerator = np.sum(v1[..., perp_axes] ** 2, axis=-1)
+    denominator = np.sum(v1 ** 2, axis=-1) ** 2  # squared denominator, as in PhantomCreation.m
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sin2 = numerator / denominator
+        theta = np.arcsin(np.sqrt(sin2)) * (180.0 / np.pi)
+    return theta
+
+
+def apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=None, seg=None,
+                        tract_params=None, region8_r1_weighting=True,
+                        noise_std=0.01, noise_seed=0):
+    """
+    Apply per-tract white-matter susceptibility anisotropy to chi- (the "Apparent
+    susceptibility" block of PhantomCreation.m).
+
+    For each WM tract label (1..11) in ``wm_tract_mask`` the apparent diamagnetic
+    susceptibility is
+        chi_neg = delta_chi * cos^2(theta) + chi_0
+    with (delta_chi, chi_0) taken from the phantom's deltaX_values/Xzero_values
+    (WM_TRACT_ANISOTROPY_ARRAYS) and theta the fibre-to-field angle in DEGREES
+    (see generate_theta_from_v1). This overwrites chi- in the union of the WM
+    tracts, exactly as the MATLAB replaces ``chi_negative_data(segmentation==region)``.
+
+    Parameters
+    ----------
+    chi_neg : numpy.ndarray
+        3D diamagnetic susceptibility map (ppm). Modified in the WM-tract voxels.
+    wm_tract_mask : numpy.ndarray
+        3D white_matter_mask with tract labels 1..11 (0 elsewhere).
+    theta : numpy.ndarray
+        3D fibre-to-field angle map in degrees (from generate_theta_from_v1).
+    R1 : numpy.ndarray or None
+        3D R1 map, used for the region-8 R1-weighting step below (only when
+        ``region8_r1_weighting`` and ``seg`` are provided).
+    seg : numpy.ndarray or None
+        3D SegmentedModel labels; region 8 (generic WM) is where the R1-weighting
+        is applied in PhantomCreation.m.
+    tract_params : dict or None
+        {label: (delta_chi, chi_0)}. Default WM_TRACT_ANISOTROPY_ARRAYS.
+    region8_r1_weighting : bool
+        If True and R1 and seg are given, apply the R1-percentage texture in
+        SegmentedModel region 8.
+    noise_std : float
+        Standard deviation of the Gaussian noise added to the R1-percentage term
+        at each of the three iterations (PhantomCreation.m uses 0.01). Set to 0 to
+        apply the deterministic R1-percentage term only.
+    noise_seed : int or None
+        Seed for the noise generator, so the (otherwise random) texture is
+        reproducible. Default 0. Ignored when ``noise_std`` is 0 or None.
+
+    Returns
+    -------
+    numpy.ndarray
+        chi_neg with anisotropic WM susceptibility (float, NaNs -> 0).
+    """
+    if tract_params is None:
+        tract_params = WM_TRACT_ANISOTROPY_ARRAYS
+
+    chi_neg = np.asarray(chi_neg, dtype=np.float64).copy()
+    theta = np.asarray(theta, dtype=np.float64)
+
+    # Build the delta_X and Xzero maps and the apparent susceptibility Xapp
+    # exactly as PhantomCreation.m: Xapp = deltaX.*cos(theta*pi/180).^2 + Xzero.
+    delta_map = np.zeros_like(chi_neg)
+    xzero_map = np.zeros_like(chi_neg)
+    tract_union = np.zeros_like(chi_neg, dtype=bool)
+    for label, (delta_chi, chi_0) in tract_params.items():
+        m = (wm_tract_mask == label)
+        if not m.any():
             continue
+        delta_map[m] = delta_chi
+        xzero_map[m] = chi_0
+        tract_union |= m
 
-        # Compute cos^2(theta) from V1 and B0 direction
-        v1 = v1_map[wm_mask]  # (N, 3)
-        cos_theta = np.abs(np.dot(v1, B0_dir))
-        cos2_theta = cos_theta ** 2
+    xapp = delta_map * (np.cos(theta * np.pi / 180.0) ** 2) + xzero_map
 
-        # Anisotropic chi_neg
-        chi_neg_aniso = delta_chi * cos2_theta + chi_0
-
-        # Optionally modulate with R1-weighted noise for texture
-        if R1 is not None and noise_sigma > 0:
-            mean_r1 = np.mean(R1[wm_mask])
-            if mean_r1 > 0:
-                pct_r1 = R1[wm_mask] / mean_r1
-                noise = np.random.normal(0, noise_sigma, size=pct_r1.shape)
-                pct_r1_noisy = pct_r1 + noise
-                # Apply 3 iterations of noise modulation (matching MATLAB)
+    # Region-8 (WM in SegmentedModel) R1-percentage weighting. PhantomCreation.m
+    # iterates xapp *= (pct + N(0, noise_std)) three times, where pct = R1/mean(R1)
+    # over the region. The noise generator is seeded (noise_seed) so the texture is
+    # reproducible.
+    region8 = (seg == 8) if seg is not None else tract_union
+    if region8_r1_weighting and R1 is not None and seg is not None:
+        R1 = np.asarray(R1, dtype=np.float64)
+        if region8.any():
+            mean_r1 = np.mean(R1[region8])
+            if mean_r1 != 0:
+                pct = np.zeros_like(chi_neg)
+                pct[region8] = R1[region8] / mean_r1
+                rng = np.random.default_rng(noise_seed) if noise_std else None
                 for _ in range(3):
-                    noise = np.random.normal(0, noise_sigma, size=pct_r1_noisy.shape)
-                    pct_r1_noisy = pct_r1_noisy * (pct_r1 + noise)
-                chi_neg_aniso = chi_neg_aniso * pct_r1_noisy
+                    weight = pct if not noise_std else pct + rng.normal(0.0, noise_std, size=pct.shape)
+                    xapp = np.where(region8, xapp * weight, xapp)
 
-        chi_neg[wm_mask] = chi_neg_aniso
-
+    # Replace chi- in the SegmentedModel WM (label 8), exactly as PhantomCreation.m
+    # (`chi_negative_data(segmentation==8) = Xapp_masked(...)`). The white-matter tract
+    # mask supplies the per-tract delta_chi/chi_0; it covers ~99% of WM(8), and the
+    # uncovered WM voxels get xapp≈0 there, matching the reference.
+    overwrite = region8 if seg is not None else tract_union
+    chi_neg[overwrite] = xapp[overwrite]
     chi_neg[np.isnan(chi_neg)] = 0
     return chi_neg
 
 
-def generate_chisep_maps(chi, seg, mask, voxel_size=(0.64, 0.64, 0.64),
-                         tissue_params=None, boundary_smooth_fwhm=1.2,
-                         noise_std=0.002, rng=None,
-                         v1_map=None, anisotropy=False,
-                         B0_dir=np.array([0, 0, 1]), R1=None):
+def _build_chisep_component(seg, R1, R2star, weighting_between_models,
+                            r12chi, r2star2chi, base_chi, smooth_fwhm, voxel_size,
+                            hg_mask_index):
     """
-    Generate separate paramagnetic (chi+) and diamagnetic (chi-) susceptibility maps.
+    Build ONE chi component (chi+ or chi-) bottom-up per PhantomCreationFunction.m.
 
-    Uses the tissue segmentation to split the total susceptibility into iron
-    (paramagnetic, positive) and myelin (diamagnetic, negative) components based
-    on literature values for each tissue type. Spatial variation within each
-    tissue is inherited from the input chi map and distributed between chi+ and
-    chi- according to tissue-specific iron fractions.
+    ``r12chi``/``r2star2chi`` are per-label 1-based lists of the R1 / R2* modulation
+    coefficients for this component; ``base_chi`` is the per-label base value
+    (chipos or chineg). ``hg_mask_index`` is the boolean LG_mask (HighGrad==0|1).
+    Returns Chimap5 = W^4*Chimap3 + (1-W^4)*Chimap4.
+    """
+    shape = seg.shape
+    chimap3 = np.zeros(shape, dtype=np.float64)
+    chimap4 = np.zeros(shape, dtype=np.float64)
+    prob_acc = np.zeros(shape, dtype=np.float64)
 
-    Tissue boundaries are smoothed using Gaussian-weighted blending (following
-    the approach of Marques et al., 2021 for the QSM Challenge head phantom).
+    NSTD = 3
+    smoothThresh = 0.9
+    smoothThresh2 = 0.05
+
+    labels = sorted(base_chi.keys())
+    for k in labels:
+        mask_k = (seg == k)
+        n = int(mask_k.sum())
+        if n <= 1:
+            continue
+
+        # FAITHFUL: PhantomCreationFunction.m calls smooth3D(Mask, FWHM_V, [1,1,1]) — i.e. the
+        # probability-blend Gaussian FWHM is in VOXEL units ([1,1,1]), NOT the real voxel size.
+        # Using the real 0.64 mm here widens the kernel ~1.5x, over-spreading the tissue
+        # probabilities (over-reduces the hard-branch tissues like blood and smears deep-GM
+        # interiors low). Pass [1,1,1] to match the reference exactly.
+        mask_smooth = np.real(smooth3d_fft(mask_k.astype(np.float64), smooth_fwhm, (1.0, 1.0, 1.0)))
+        r2s_mean = np.mean(R2star[mask_k])
+        r1_mean = np.mean(R1[mask_k])
+        chipos_k = base_chi[k]
+
+        if k <= 10:
+            prob_acc += mask_smooth
+            lg = hg_mask_index  # boolean over full volume
+            # chitemp over the LG voxels
+            chitemp = (r2star2chi[k] * (R2star[lg] - r2s_mean)
+                       + r12chi[k] * (R1[lg] - r1_mean))
+            ms_lg = mask_smooth[lg]
+
+            sel_hi = ms_lg > smoothThresh
+            if sel_hi.any():
+                mod_std = np.std(chitemp[sel_hi], ddof=1) if sel_hi.sum() > 1 else 0.0
+                mod_mean = np.mean(chitemp[sel_hi])
+            else:
+                mod_std = 0.0
+                mod_mean = 0.0
+            clamp = (ms_lg > smoothThresh2) & (np.abs(chitemp - mod_mean) > NSTD * mod_std)
+            chitemp = chitemp.copy()
+            chitemp[clamp] = mod_mean
+
+            add3 = np.zeros(shape, dtype=np.float64)
+            add3[lg] = ms_lg * (chipos_k + chitemp)
+            chimap3 += add3
+
+            # second clamp pass (Chimap4 uses the re-clamped chitemp)
+            if sel_hi.any():
+                mod_std = np.std(chitemp[sel_hi], ddof=1) if sel_hi.sum() > 1 else 0.0
+                mod_mean = np.mean(chitemp[sel_hi])
+            else:
+                mod_std = 0.0
+                mod_mean = 0.0
+            clamp = (ms_lg > smoothThresh2) & (np.abs(chitemp - mod_mean) > NSTD * mod_std)
+            chitemp[clamp] = mod_mean
+
+            add4 = np.zeros(shape, dtype=np.float64)
+            add4[lg] = ms_lg * (chipos_k + chitemp)
+            chimap4 += add4
+        else:
+            idx = mask_k
+            chitemp = (r2star2chi[k] * (R2star[idx] - r2s_mean)
+                       + r12chi[k] * (R1[idx] - r1_mean))
+            # In the MATLAB, Mask(indexes) is all-ones inside the region, so the
+            # (Mask>smoothThresh) selection is the whole region and the two
+            # inequality-clamps (chitemp>m+3s AND chitemp<m+3s) together set
+            # EVERY voxel to modulation_mean.
+            # Reproduces the MATLAB clamp, which sets chitemp to its mean over the region.
+            mod_mean = np.mean(chitemp)
+            chitemp = np.full_like(chitemp, mod_mean)
+
+            prob_here = (1.0 - prob_acc[idx])  # (Mask - ProbabilityAccumulated)
+            chimap3[idx] += prob_here * (chipos_k + chitemp)
+
+            # second pass: chitemp already flat -> mean unchanged
+            mod_mean = np.mean(chitemp)
+            chitemp = np.full_like(chitemp, mod_mean)
+            chimap4[idx] += prob_here * (chipos_k + chitemp)
+
+    W4 = weighting_between_models ** 4
+    return W4 * chimap3 + (1.0 - W4) * chimap4
+
+
+def generate_chisep_maps(seg, mask, R1, R2star, raw_field, high_grad,
+                         voxel_size=(0.64, 0.64, 0.64), tissue_params=None,
+                         boundary_smooth_fwhm=1.2, v1_map=None,
+                         wm_tract_mask=None, anisotropy=False,
+                         B0_dir=np.array([0, 0, 1]), apply_brain_mask=True,
+                         enforce_sign=True):
+    """
+    Build paramagnetic (chi+) and diamagnetic (chi-) susceptibility maps BOTTOM-UP,
+    a port of PhantomCreationFunction.m (+ the anisotropy block of
+    PhantomCreation.m).
+
+    chi+ and chi- are each constructed
+    independently from the per-tissue base values (chipos / chineg) plus real
+    intra-tissue texture derived from the wavelet-denoised R1 and R2* maps:
+
+        chitemp = R2star2chi*(R2* - tissue_mean) + R12chi*(R1 - tissue_mean)
+
+    with a NSTD=3 outlier clamp, a smooth3D(FWHM=1.2) probability blend, and a
+    two-model field-gradient weighting
+        Chimap5 = W^4 * Chimap3 + (1-W^4) * Chimap4,  W = cos(fieldgradient).
+    See PhantomCreationFunction.m for the exact construction.
 
     Parameters
     ----------
-    chi : numpy.ndarray
-        Total susceptibility map in ppm (3D).
     seg : numpy.ndarray
-        Tissue segmentation labels (3D, integer-valued).
+        3D SegmentedModel labels (1..16), matching CHISEP_TISSUE_PARAMS.
     mask : numpy.ndarray
-        Binary brain mask (3D).
-    voxel_size : tuple of float, optional
-        Voxel dimensions in mm. Default is (0.64, 0.64, 0.64).
-    tissue_params : dict or None, optional
-        Per-tissue parameters: {label: (chi_pos_ref, chi_neg_ref, iron_frac)}.
-        If None, uses CHISEP_TISSUE_PARAMS.
-    boundary_smooth_fwhm : float, optional
-        FWHM of Gaussian smoothing for tissue boundaries in mm. Default is 1.2.
-    noise_std : float, optional
-        Standard deviation of independent Gaussian noise added to chi+ and chi-
-        (in ppm). Set to 0 to disable. Default is 0.002.
-    rng : numpy.random.Generator or None, optional
-        Random number generator for reproducible noise. If None and noise_std > 0,
-        a new generator is created.
+        3D brain mask (applied to the outputs).
+    R1 : numpy.ndarray
+        3D R1 map (1/T1). Wavelet-denoised internally (threshold 25/1000, db2,
+        'verysoft', mask R1!=0), per the MATLAB.
+    R2star : numpy.ndarray
+        3D R2* map (1/T2*). Wavelet-denoised internally (threshold 45/10, db2,
+        'soft').
+    raw_field : numpy.ndarray
+        3D raw field map; its gradient magnitude drives the two-model weighting.
+    high_grad : numpy.ndarray
+        3D high-gradient mask (0/1); defines the LG mask and modulates the field
+        gradient.
+    voxel_size : tuple of float
+        Voxel size in mm. Default (0.64, 0.64, 0.64).
+    tissue_params : dict or None
+        Per-tissue 6-tuples (chipos, chineg, R12chipos, R2star2chipos, R12chineg,
+        R2star2chineg). Default CHISEP_TISSUE_PARAMS.
+    boundary_smooth_fwhm : float
+        FWHM (mm) for smooth3D probability blending. Default 1.2.
+    v1_map : numpy.ndarray or None
+        4D (x,y,z,3) primary-eigenvector map; required when anisotropy=True.
+    wm_tract_mask : numpy.ndarray or None
+        3D white_matter_mask with tract labels 1..11; required when anisotropy=True.
+    anisotropy : bool
+        If True, overwrite chi- in the WM tracts with the apparent
+        (orientation-dependent) susceptibility (apply_wm_anisotropy).
+    B0_dir : numpy.ndarray
+        B0 direction for the theta computation. Default [0, 0, 1].
 
     Returns
     -------
-    chi_pos : numpy.ndarray
-        Paramagnetic susceptibility map (>= 0, ppm, float32).
-    chi_neg : numpy.ndarray
-        Diamagnetic susceptibility map (<= 0, ppm, float32).
+    chi_pos : numpy.ndarray (float32)
+        Paramagnetic susceptibility map (ppm).
+    chi_neg : numpy.ndarray (float32)
+        Diamagnetic susceptibility map (ppm).
     """
     if tissue_params is None:
         tissue_params = CHISEP_TISSUE_PARAMS
 
-    # Gaussian sigma in voxels (FWHM = 2.355 * sigma)
-    sigma_vox = [boundary_smooth_fwhm / (2.355 * vs) for vs in voxel_size]
+    seg = np.asarray(seg, dtype=np.float64)
+    mask = np.asarray(mask, dtype=np.float64)
+    R1 = np.asarray(R1, dtype=np.float64)
+    R2star = np.asarray(R2star, dtype=np.float64)
+    raw_field = np.asarray(raw_field, dtype=np.float64)
+    high_grad = np.asarray(high_grad, dtype=np.float64)
+    vox = tuple(voxel_size)
 
-    # Weighted accumulation for smooth tissue boundary blending
-    chi_pos_acc = np.zeros_like(chi, dtype=np.float64)
-    chi_neg_acc = np.zeros_like(chi, dtype=np.float64)
-    weight_acc = np.zeros_like(chi, dtype=np.float64)
-    assigned = np.zeros_like(chi, dtype=bool)
+    # Wavelet denoise R1 (verysoft) and R2* (soft), matching PhantomCreationFunction.m.
+    R1_dn = np.abs(np.real(wavelet_denoise(R1, 25.0 / 1000.0, 8, 'db2', 'verysoft', mask=(R1 != 0).astype(np.float64))))
+    R2star_dn = np.abs(np.real(wavelet_denoise(R2star, 45.0 / 10.0, 8, 'db2', 'soft', mask=(R1_dn != 0).astype(np.float64))))
 
-    for label, (cp_ref, cn_ref, ifrac) in tissue_params.items():
-        tissue_hard = (seg == label)
-        if not tissue_hard.any():
-            continue
-        assigned |= tissue_hard
+    # Field-gradient two-model weighting (WeightingBetweenModels = cos(fieldgradient)).
+    gx, gy, gz = gradient_3d_midpoint(raw_field, res=(1, 1, 1))
+    fieldgradient = sos(np.stack([gx, gy, gz], axis=-1), dim=-1)
+    fieldgradient[seg >= 11] = 0
+    fieldgradient = fieldgradient * high_grad
+    nz = fieldgradient != 0
+    fieldgradient[nz & (fieldgradient > 0.2)] = 0.2
+    fieldgradient[nz & (fieldgradient < 0.05)] = 0.05
+    nz = fieldgradient != 0
+    fieldgradient[nz] = (fieldgradient[nz] - 0.05) / (0.2 - 0.05)
+    weighting_between_models = np.cos(fieldgradient)
 
-        # Smooth tissue probability mask for boundary blending
-        tissue_prob = gaussian_filter(tissue_hard.astype(np.float64), sigma=sigma_vox)
+    # LG mask index: HighGrad == 0 or == 1 (i.e. essentially the whole defined volume).
+    hg_mask_index = (high_grad == 0) | (high_grad == 1)
 
-        # Per-voxel chi+ and chi- for this tissue
-        # Within the tissue: split the chi variation based on iron_frac
-        # Outside the tissue (boundary region): use reference values
-        chi_ref = cp_ref + cn_ref
-        delta = chi - chi_ref
-        cp_vals = cp_ref + ifrac * delta
-        cn_vals = cn_ref + (1.0 - ifrac) * delta
+    # Per-label modulation coefficient lookups (1-based labels).
+    r12chipos = {k: v[2] for k, v in tissue_params.items()}
+    r2star2chipos = {k: v[3] for k, v in tissue_params.items()}
+    r12chineg = {k: v[4] for k, v in tissue_params.items()}
+    r2star2chineg = {k: v[5] for k, v in tissue_params.items()}
+    base_chipos = {k: v[0] for k, v in tissue_params.items()}
+    base_chineg = {k: v[1] for k, v in tissue_params.items()}
 
-        # At boundaries, use reference values (delta=0 outside tissue)
-        cp_vals = np.where(tissue_hard, cp_vals, cp_ref)
-        cn_vals = np.where(tissue_hard, cn_vals, cn_ref)
+    chi_pos = _build_chisep_component(
+        seg, R1_dn, R2star_dn, weighting_between_models,
+        r12chipos, r2star2chipos, base_chipos, boundary_smooth_fwhm, vox, hg_mask_index)
+    chi_neg = _build_chisep_component(
+        seg, R1_dn, R2star_dn, weighting_between_models,
+        r12chineg, r2star2chineg, base_chineg, boundary_smooth_fwhm, vox, hg_mask_index)
 
-        chi_pos_acc += tissue_prob * cp_vals
-        chi_neg_acc += tissue_prob * cn_vals
-        weight_acc += tissue_prob
+    # Optional WM susceptibility anisotropy (chi- only), per PhantomCreation.m.
+    if anisotropy:
+        if v1_map is None or wm_tract_mask is None:
+            raise ValueError("anisotropy=True requires both v1_map and wm_tract_mask")
+        theta = generate_theta_from_v1(v1_map, B0_dir=B0_dir, mask=(seg == 8))
+        chi_neg = apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=R1_dn, seg=seg)
 
-    # For any unassigned voxels in the mask, use simple max/min split
-    unassigned = (mask > 0) & ~assigned
-    if unassigned.any():
-        tissue_prob = gaussian_filter(unassigned.astype(np.float64), sigma=sigma_vox)
-        chi_pos_acc += tissue_prob * np.maximum(0, chi)
-        chi_neg_acc += tissue_prob * np.minimum(0, chi)
-        weight_acc += tissue_prob
+    # Enforce the physical sign of each source (paramagnetic chi+ >= 0, diamagnetic
+    # chi- <= 0). The R1/R2* modulation can otherwise push a few voxels past zero.
+    if enforce_sign:
+        chi_pos = np.maximum(chi_pos, 0.0)
+        chi_neg = np.minimum(chi_neg, 0.0)
 
-    # Normalize by total weight
-    valid = weight_acc > 1e-10
-    chi_pos = np.zeros_like(chi, dtype=np.float64)
-    chi_neg = np.zeros_like(chi, dtype=np.float64)
-    chi_pos[valid] = chi_pos_acc[valid] / weight_acc[valid]
-    chi_neg[valid] = chi_neg_acc[valid] / weight_acc[valid]
-
-    # Enforce sign constraints while preserving total chi
-    # If chi_neg > 0: all susceptibility is paramagnetic
-    chi_total = chi_pos + chi_neg
-    neg_violation = chi_neg > 0
-    chi_pos[neg_violation] = chi_total[neg_violation]
-    chi_neg[neg_violation] = 0.0
-
-    # If chi_pos < 0: all susceptibility is diamagnetic
-    pos_violation = chi_pos < 0
-    chi_neg[pos_violation] = chi_total[pos_violation]
-    chi_pos[pos_violation] = 0.0
-
-    # Apply brain mask
-    chi_pos *= (mask > 0)
-    chi_neg *= (mask > 0)
-
-    # Add small independent noise for realism
-    if noise_std > 0:
-        if rng is None:
-            rng = np.random.default_rng()
-        brain = mask > 0
-        # Spatially correlated noise (smooth white noise)
-        noise_smooth_sigma = [1.0 / vs for vs in voxel_size]  # ~1mm correlation
-        noise_pos = gaussian_filter(rng.normal(0, 1, chi.shape), sigma=noise_smooth_sigma)
-        noise_neg = gaussian_filter(rng.normal(0, 1, chi.shape), sigma=noise_smooth_sigma)
-        # Normalize to desired std within brain
-        noise_pos = noise_pos / (noise_pos[brain].std() + 1e-10) * noise_std
-        noise_neg = noise_neg / (noise_neg[brain].std() + 1e-10) * noise_std
-        chi_pos = np.maximum(0, chi_pos + noise_pos * brain)
-        chi_neg = np.minimum(0, chi_neg + noise_neg * brain)
-
-    # Apply WM susceptibility anisotropy if requested
-    if anisotropy and v1_map is not None:
-        chi_neg = apply_wm_anisotropy(
-            chi_neg, seg, v1_map, B0_dir=B0_dir, R1=R1
-        )
+    # Restrict to the brain mask unless a whole-head map is requested.
+    if apply_brain_mask:
+        brain = (mask > 0)
+        chi_pos = chi_pos * brain
+        chi_neg = chi_neg * brain
+    chi_pos[np.isnan(chi_pos)] = 0
+    chi_neg[np.isnan(chi_neg)] = 0
 
     return chi_pos.astype(np.float32), chi_neg.astype(np.float32)
 
