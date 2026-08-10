@@ -877,3 +877,28 @@ class TestHollowCylinderMultiCompartment:
         TE1, TE2 = 8e-3, 24e-3
         np.testing.assert_allclose(ratio(TE2) / ratio(TE1),
                                    np.exp(-(TE2 - TE1) * r2prime), rtol=1e-6)
+
+    def test_hc_wm_se_signal_is_pool_t2_mixture(self):
+        """The WM spin-echo factor is the refocused 3-pool T2 mixture: no frequency
+        offsets, no mesoscopic R2', same volume fractions as hc_wm_signal. This keeps
+        the SE consistent with the multicompartment GRE so the signal-derivable
+        R2' = R2* - R2 matches the provided r2prime in WM."""
+        p = qsm_forward.WM_HC_PARAMS
+        mwf = 0.12
+        fM, rest = mwf, 1.0 - mwf
+        fA, fE = rest * p["f_axon"], rest * (1.0 - p["f_axon"])
+        for TE in (8e-3, 24e-3, 64e-3):
+            expected = (fM * np.exp(-TE / p["T2_M"])
+                        + fA * np.exp(-TE / p["T2_A"])
+                        + fE * np.exp(-TE / p["T2_E"]))
+            np.testing.assert_allclose(qsm_forward.hc_wm_se_signal(TE, mwf), expected, rtol=1e-12)
+        # equals the magnitude-relevant part of hc_wm_signal with frequencies and R2' off
+        for TE in (8e-3, 24e-3):
+            gre_pools = qsm_forward.hc_wm_signal(
+                TE, 0.0, 7.0, mwf, R2p_meso=0.0,
+                p={"chi_I": 0.0, "chi_A": 0.0, "E": 0.0})
+            np.testing.assert_allclose(qsm_forward.hc_wm_se_signal(TE, mwf),
+                                       np.abs(gre_pools), rtol=1e-12)
+        # broadcasts over an mwf array
+        arr = qsm_forward.hc_wm_se_signal(10e-3, np.array([0.05, 0.12, 0.25]))
+        assert arr.shape == (3,) and np.all(np.diff(arr) < 0)  # more myelin water => faster SE decay
