@@ -840,3 +840,40 @@ class TestHollowCylinderMultiCompartment:
             field, TE=TE, multicompartment=False, **kw)[1, 1, 1])
             for TE in TEs])
         np.testing.assert_allclose(nonwm_a, nonwm_single, rtol=1e-12, atol=1e-15)
+
+    def test_wm_multicompartment_preserves_R2prime(self):
+        """WM keeps its mesoscopic R2' (Dr*|chi|) applied on top of the pool T2s, rather
+        than dropping it — so WM retains its susceptibility contrast and stays consistent
+        with the provided r2prime. Checks (1) hc_wm_signal factorises R2p_meso as
+        exp(-TE*R2'), and (2) generate_signal's WM branch feeds in Dr_pos*|chi+|+Dr_neg*|chi-|."""
+        B0 = 7.0
+        th, mwf = np.deg2rad(50), 0.12
+        # (1) factorisation property of hc_wm_signal
+        for TE in (8e-3, 24e-3):
+            s0 = qsm_forward.hc_wm_signal(TE, th, B0, mwf, R2p_meso=0.0)
+            sr = qsm_forward.hc_wm_signal(TE, th, B0, mwf, R2p_meso=8.0)
+            np.testing.assert_allclose(sr, s0 * np.exp(-8.0 * TE), rtol=1e-12)
+        # (2) generate_signal WM branch applies R2' = Dr_pos*|chi+| + Dr_neg*|chi-|
+        shp = (2, 2, 2)
+        field = np.zeros(shp)
+        R2 = np.ones(shp) * 15.0
+        drp = np.ones(shp) * 137.0
+        drn = np.ones(shp) * 137.0
+        chip = np.ones(shp) * 0.02
+        chin = -np.ones(shp) * 0.06
+        wm = np.zeros(shp, bool)
+        wm[0, 0, 0] = True
+        theta = np.full(shp, th)
+        r2prime = 137.0 * 0.02 + 137.0 * 0.06  # expected source R2' at the WM voxel (Hz)
+        kw = dict(B0=7, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin)
+        mwf_wm = qsm_forward.hc_mwf_from_myelin_content(-0.06)
+
+        def ratio(TE):
+            g = np.abs(qsm_forward.generate_signal(
+                field, TE=TE, multicompartment=True, theta=theta, wm_mask=wm, **kw)[0, 0, 0])
+            pool0 = np.abs(qsm_forward.hc_wm_signal(TE, th, 7, mwf_wm, R2p_meso=0.0))
+            return g / pool0  # cancels the M0/T1/flip constant, leaving exp(-TE*r2prime)
+
+        TE1, TE2 = 8e-3, 24e-3
+        np.testing.assert_allclose(ratio(TE2) / ratio(TE1),
+                                   np.exp(-(TE2 - TE1) * r2prime), rtol=1e-6)
