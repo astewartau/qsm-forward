@@ -11,6 +11,8 @@ from .qsm_forward import (
     smooth3d_fft, gradient_3d_midpoint, sos, wavelet_denoise, generate_theta_from_v1,
     T2_TISSUE_PARAMS_7T, R1_3T_DIVISION_FACTORS,
     WM_TRACT_ANISOTROPY_PARAMS, WM_TRACT_ANISOTROPY_ARRAYS,
+    hc_compartment_freqs, hc_wm_signal, hc_mwf_from_myelin_content,
+    WM_HC_PARAMS, GAMMA_BAR_HC,
 )
 __all__ = [
     'generate_bids', 'generate_field', 'generate_signal', 'generate_se_signal', 'add_noise',
@@ -24,4 +26,6 @@ __all__ = [
     'smooth3d_fft', 'gradient_3d_midpoint', 'sos', 'wavelet_denoise', 'generate_theta_from_v1',
     'T2_TISSUE_PARAMS_7T', 'R1_3T_DIVISION_FACTORS',
     'WM_TRACT_ANISOTROPY_PARAMS', 'WM_TRACT_ANISOTROPY_ARRAYS',
+    'hc_compartment_freqs', 'hc_wm_signal', 'hc_mwf_from_myelin_content',
+    'WM_HC_PARAMS', 'GAMMA_BAR_HC',
 ]

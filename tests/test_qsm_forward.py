@@ -646,3 +646,200 @@ class TestCLINewFlags:
                 mock_tp.return_value = MagicMock()
                 main()
                 assert mock_gb.call_args[1]['save_se'] == False
+
+
+# ---------------------------------------------------------------------------
+# Hollow-cylinder multi-compartment white-matter GRE model.
+#
+# These tests assert the wired-in model (qsm_forward) reproduces the de-risked
+# standalone prototype (prototypes/hollow_cylinder/hollow_cylinder.py) for a WM
+# voxel: the three theta-dependent compartment frequencies match to ~1e-6, the
+# resulting multi-echo complex signal matches for the same TEs/theta/B0/params,
+# and the WM magnitude is non-mono-exponential (the property that makes theta
+# recoverable). Also checks the flag is inert when off / on non-WM voxels.
+# ---------------------------------------------------------------------------
+_PROTO_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "prototypes", "hollow_cylinder",
+)
+_HAVE_PROTO = os.path.isfile(os.path.join(_PROTO_DIR, "hollow_cylinder.py"))
+
+
+def _load_prototype():
+    """Import the read-only prototype module by path (it is not a package)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "hollow_cylinder_proto", os.path.join(_PROTO_DIR, "hollow_cylinder.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(not _HAVE_PROTO, reason="hollow_cylinder prototype not present")
+class TestHollowCylinderMultiCompartment:
+    def test_compartment_freqs_match_prototype(self):
+        """The three compartment frequencies must match hollow_cylinder.py to ~1e-6 Hz
+        across angles and field strengths (WM_HC_PARAMS defaults == prototype WMParams)."""
+        proto = _load_prototype()
+        p = proto.WMParams()  # prototype's calibrated defaults
+        for B0 in (3.0, 7.0):
+            for deg in (0, 15, 30, 45, 60, 75, 90):
+                th = np.deg2rad(deg)
+                ref = proto.compartment_freqs(th, B0, p)          # (M, A, E)
+                got = qsm_forward.hc_compartment_freqs(th, B0)
+                for r, g, name in zip(ref, got, ("myelin", "axon", "extra")):
+                    np.testing.assert_allclose(
+                        float(np.asarray(g)), float(np.asarray(r)), atol=1e-6,
+                        err_msg=f"{name} freq mismatch at theta={deg} B0={B0}")
+
+    def test_wm_defaults_equal_prototype_params(self):
+        """The wired-in WM parameter defaults must equal the prototype's WMParams."""
+        proto = _load_prototype()
+        p = proto.WMParams()
+        d = qsm_forward.WM_HC_PARAMS
+        assert d["chi_I"] == p.chi_I
+        assert d["chi_A"] == p.chi_A
+        assert d["E"] == p.E
+        assert d["g"] == p.g
+        assert d["T2_M"] == p.T2_M
+        assert d["T2_A"] == p.T2_A
+        assert d["T2_E"] == p.T2_E
+        assert d["f_axon"] == p.f_axon
+
+    def test_multiecho_complex_signal_matches_prototype(self):
+        """The per-voxel WM complex multi-echo signal must reproduce the prototype's
+        gre_signal (same TEs / theta / B0 / MWF, S0=1, bulk_freq=0) to ~1e-9."""
+        proto = _load_prototype()
+        TEs = np.arange(2e-3, 48e-3 + 1e-9, 2e-3)  # 24 echoes, matches prototype level 3
+        B0 = 7.0
+        for deg in (10, 35, 55, 80):
+            for mwf in (0.08, 0.12, 0.16):
+                th = np.deg2rad(deg)
+                p = proto.WMParams(MWF=mwf)
+                ref = proto.gre_signal(TEs, th, B0, p, S0=1.0, bulk_freq=0.0)
+                got = np.array([
+                    qsm_forward.hc_wm_signal(TE, th, B0, mwf, bulk_freq=0.0)
+                    for TE in TEs])
+                np.testing.assert_allclose(got, ref, atol=1e-9, rtol=1e-9)
+
+    def test_wm_magnitude_is_non_mono_exponential(self):
+        """The WM multi-echo magnitude must be non-mono-exponential: the log-mag
+        residual to a straight-line (mono-exp) fit is >> a single-pool control.
+
+        This is the property that makes theta recoverable (prototype level-1 [1h])."""
+        TEs = np.arange(2e-3, 40e-3 + 1e-9, 2e-3)
+        B0 = 7.0
+        th = np.deg2rad(60)
+        A = np.vstack([TEs, np.ones_like(TEs)]).T
+
+        mag = np.abs(np.array([qsm_forward.hc_wm_signal(TE, th, B0, 0.12) for TE in TEs]))
+        coef, *_ = np.linalg.lstsq(A, np.log(mag), rcond=None)
+        resid_mc = np.sqrt(np.mean((np.log(mag) - A @ coef) ** 2))
+
+        # single-pool control: MWF=0, no anisotropy/exchange -> one long pool, mono-exp
+        mono_p = {"chi_A": 0.0, "chi_I": 0.0, "E": 0.0}
+        mag_mono = np.abs(np.array([
+            qsm_forward.hc_wm_signal(TE, th, B0, 0.0, p=mono_p) for TE in TEs]))
+        coefm, *_ = np.linalg.lstsq(A, np.log(mag_mono), rcond=None)
+        resid_mono = np.sqrt(np.mean((np.log(mag_mono) - A @ coefm) ** 2))
+
+        assert resid_mc > 1e-3
+        assert resid_mc > 20 * max(resid_mono, 1e-12)
+
+    def test_theta_changes_wm_signal_shape(self):
+        """Different fibre angles must produce different WM multi-echo signals
+        (theta is encoded in the signal), unlike the inert scalar-chi scaffold."""
+        TEs = np.arange(2e-3, 40e-3 + 1e-9, 2e-3)
+        B0 = 7.0
+        s30 = np.array([qsm_forward.hc_wm_signal(TE, np.deg2rad(30), B0, 0.12) for TE in TEs])
+        s80 = np.array([qsm_forward.hc_wm_signal(TE, np.deg2rad(80), B0, 0.12) for TE in TEs])
+        # normalise out the (theta-independent) first-echo scale, compare shapes
+        assert not np.allclose(s30 / s30[0], s80 / s80[0], atol=1e-3)
+
+    def test_mwf_mapping_monotone_and_anchored(self):
+        """MWF grows with diamagnetic (myelin) content; the reference chi- (-0.10 ppm)
+        maps to the prototype reference MWF (0.12); values stay in a physiological band."""
+        f = qsm_forward.hc_mwf_from_myelin_content
+        np.testing.assert_allclose(float(f(-0.10e-6)), 0.12, atol=1e-9)
+        # monotone increasing in |chi-|
+        vals = [float(f(-c * 1e-6)) for c in (0.02, 0.05, 0.10, 0.15, 0.20)]
+        assert all(b >= a for a, b in zip(vals, vals[1:]))
+        # clipped to physiological band
+        arr = f(np.array([-0.0, -0.01e-6, -0.5e-6, -1.0e-6]))
+        assert np.all(arr >= 0.03) and np.all(arr <= 0.25)
+
+    def test_generate_signal_flag_off_byte_identical(self):
+        """With multicompartment=False the signal is byte-identical whether or not
+        theta/wm_mask are supplied (the WM branch is fully inert)."""
+        rng = np.random.default_rng(0)
+        shp = (6, 6, 6)
+        field = rng.standard_normal(shp) * 0.01
+        R2 = np.ones(shp) * 15.0
+        drp = np.ones(shp) * 137.0
+        drn = np.ones(shp) * 137.0
+        chip = np.ones(shp) * 0.03
+        chin = -np.ones(shp) * 0.05
+        kw = dict(B0=7, TE=20e-3, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin)
+        s1 = qsm_forward.generate_signal(field, multicompartment=False, **kw)
+        s2 = qsm_forward.generate_signal(
+            field, multicompartment=False,
+            theta=np.ones(shp), wm_mask=np.ones(shp, bool), **kw)
+        np.testing.assert_array_equal(s1, s2)
+
+    def test_generate_signal_non_wm_reduces_to_single_compartment(self):
+        """multicompartment=True with an all-False wm_mask must equal the
+        single-compartment chi-sep signal (only WM voxels get the hollow-cylinder model)."""
+        rng = np.random.default_rng(1)
+        shp = (6, 6, 6)
+        field = rng.standard_normal(shp) * 0.01
+        R2 = np.ones(shp) * 15.0
+        drp = np.ones(shp) * 137.0
+        drn = np.ones(shp) * 137.0
+        chip = np.ones(shp) * 0.03
+        chin = -np.ones(shp) * 0.05
+        kw = dict(B0=7, TE=20e-3, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin)
+        s_single = qsm_forward.generate_signal(field, multicompartment=False, **kw)
+        s_mc_nowm = qsm_forward.generate_signal(
+            field, multicompartment=True,
+            theta=np.zeros(shp), wm_mask=np.zeros(shp, bool), **kw)
+        np.testing.assert_allclose(s_mc_nowm, s_single, rtol=1e-12, atol=1e-15)
+
+    def test_generate_signal_wm_voxels_differ_and_encode_theta(self):
+        """In a mixed volume, WM voxels (multicompartment) differ from the single-
+        compartment signal, and their multi-echo signal depends on theta."""
+        shp = (4, 4, 4)
+        field = np.zeros(shp)
+        R2 = np.ones(shp) * 15.0
+        drp = np.ones(shp) * 137.0
+        drn = np.ones(shp) * 137.0
+        chip = np.ones(shp) * 0.02
+        chin = -np.ones(shp) * 0.06
+        wm = np.zeros(shp, bool)
+        wm[0, 0, 0] = True  # single WM voxel
+        theta_a = np.full(shp, np.deg2rad(20))
+        theta_b = np.full(shp, np.deg2rad(80))
+        TEs = np.arange(4e-3, 40e-3 + 1e-9, 4e-3)
+        kw = dict(B0=7, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin)
+
+        sig_a = np.array([np.abs(qsm_forward.generate_signal(
+            field, TE=TE, multicompartment=True, theta=theta_a, wm_mask=wm, **kw)[0, 0, 0])
+            for TE in TEs])
+        sig_b = np.array([np.abs(qsm_forward.generate_signal(
+            field, TE=TE, multicompartment=True, theta=theta_b, wm_mask=wm, **kw)[0, 0, 0])
+            for TE in TEs])
+        sig_single = np.array([np.abs(qsm_forward.generate_signal(
+            field, TE=TE, multicompartment=False, **kw)[0, 0, 0])
+            for TE in TEs])
+
+        # WM voxel differs from single-compartment, and theta changes its decay shape
+        assert not np.allclose(sig_a, sig_single, atol=1e-6)
+        assert not np.allclose(sig_a / sig_a[0], sig_b / sig_b[0], atol=1e-3)
+
+        # a non-WM voxel in the SAME call is unchanged vs single-compartment
+        nonwm_a = np.array([np.abs(qsm_forward.generate_signal(
+            field, TE=TE, multicompartment=True, theta=theta_a, wm_mask=wm, **kw)[1, 1, 1])
+            for TE in TEs])
+        nonwm_single = np.array([np.abs(qsm_forward.generate_signal(
+            field, TE=TE, multicompartment=False, **kw)[1, 1, 1])
+            for TE in TEs])
+        np.testing.assert_allclose(nonwm_a, nonwm_single, rtol=1e-12, atol=1e-15)

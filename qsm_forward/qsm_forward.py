@@ -713,6 +713,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     dr_neg_data = None
     chi_pos_data = None
     chi_neg_data = None
+    theta_data = None
+    wm_mask_data = None
 
     if chisep_signal or save_se:
         print("Computing transverse relaxation (R2)...")
@@ -762,6 +764,21 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             dr_pos_data = dr
             dr_neg_data = dr if dr_neg is None else dr_neg
 
+        # Multi-compartment hollow-cylinder WM model needs the per-voxel fibre-to-B0
+        # angle theta (radians) and a white-matter mask (seg == 8). theta comes from
+        # the existing V1/DTI angle_map (degrees); if it is unavailable the WM voxels
+        # simply fall back to the single-compartment chi-sep decay inside
+        # generate_signal (theta=None => no enrichment).
+        theta_data = None
+        wm_mask_data = None
+        if chisep_multicompartment:
+            wm_mask_data = (tissue_params.seg.get_fdata() == 8)
+            if tissue_params.angle_map is not None:
+                theta_data = np.deg2rad(tissue_params.angle_map.get_fdata().astype(np.float64))
+                print("  Multi-compartment WM model: using V1-derived theta for hollow-cylinder pools")
+            else:
+                print("  WARNING: chisep_multicompartment set but no angle_map; WM stays single-compartment")
+
         if save_dr_pos or save_dr_neg:
             # Broadcast scalar kernels to masked constant maps for saving
             mask_data = tissue_params.mask.get_fdata()
@@ -794,6 +811,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             chi_pos=chi_pos_data,
             chi_neg=chi_neg_data,
             multicompartment=chisep_multicompartment,
+            theta=theta_data,
+            wm_mask=wm_mask_data,
         )
     
         # k-space cropping of sigHR
@@ -1968,8 +1987,159 @@ def generate_shimmed_field(field, mask, order=2):
     
     return FIT3D, Residuals, b
 
+
+# ---------------------------------------------------------------------------
+# Hollow-cylinder multi-compartment white-matter GRE model.
+#
+# Wharton & Bowtell (2012, PNAS 109:18559) model the myelin sheath as an infinite
+# hollow cylinder of material with a cylindrically-symmetric, radially-oriented
+# anisotropic susceptibility tensor (isotropic part chi_I, anisotropic part chi_A).
+# A myelinated-axon voxel then holds three water pools — myelin water (MW), axonal
+# water (AW) and extra-axonal water (EW) — each with a volume fraction f, a T2, and
+# a theta-dependent resonance-frequency offset (theta = fibre-to-B0 angle):
+#
+#   S(TE) = S0 · e^{i·2π·f_bulk·TE} · Σ_p  f_p · e^{−TE/T2_p} · e^{i·2π·Δf_p(θ)·TE}
+#
+# This makes the multi-echo magnitude non-mono-exponential and the phase non-linear,
+# with the compartment frequencies (and hence the whole signal shape) depending on
+# theta — so a fit of a single-orientation multi-echo GRE recovers theta and the
+# myelin-water fraction. The shipped scalar-chi + mono-exponential model does NOT
+# encode theta in the signal shape; this branch is the fix.
+#
+# The three frequency closed forms, the seed/calibrated parameters, and the wiring
+# recipe are ported verbatim from the de-risked prototype at
+# prototypes/hollow_cylinder/hollow_cylinder.py (see its REPORT.md for the
+# literature validation: analytical self-consistency, empirical realism vs
+# Wharton & Bowtell, and theta/MWF recoverability to ~1° at SNR 100).
+#
+# References:
+#   Wharton S, Bowtell R. Fiber orientation-dependent white matter contrast in
+#     gradient echo MRI. PNAS 2012;109:18559.
+#   Yablonskiy & Sukstanskii, MRM 2014;71:2059; Nam et al., NeuroImage 2015;116:214.
+# ---------------------------------------------------------------------------
+
+# 1H gyromagnetic ratio / 2π (Hz/T). Matches the prototype exactly (42.577e6) so the
+# wired-in model reproduces hollow_cylinder.py to ~1e-6; the bulk-phase term below
+# keeps the pipeline's own 42.58 MHz/T convention for the common field phase.
+GAMMA_BAR_HC = 42.577e6
+
+# Calibrated white-matter hollow-cylinder parameters (prototype WMParams defaults).
+# chi_I/chi_A/E in SI (dimensionless, i.e. ppm × 1e-6); g dimensionless; T2 in seconds.
+WM_HC_PARAMS = {
+    "chi_I": -0.06e-6,   # isotropic susceptibility (W&B Table 3: -0.06±0.02)
+    "chi_A": -0.10e-6,   # anisotropic susceptibility (W&B Table 3: -0.12±0.02; seed -0.1)
+    "E": 0.02e-6,        # isotropic exchange offset (ppm)
+    "g": 0.7,            # g-ratio (W&B 0.7-0.8)
+    "T2_M": 10e-3,       # myelin-water T2 (~10 ms)
+    "T2_A": 64e-3,       # axonal-water T2 (long pool)
+    "T2_E": 48e-3,       # extra-axonal-water T2 (long pool)
+    "f_axon": 0.55,      # axonal fraction of the NON-myelin water
+    "R2p_meso": 0.0,     # optional common mesoscopic R2' (Hz); TODO: still 0 (prototype)
+}
+
+
+def _hc_freq_axon(theta, B0, chi_A, g):
+    """Intra-axonal water frequency offset (Hz).
+
+    Field inside an infinite cylinder is uniform, driven ENTIRELY by chi_A:
+        Δf_A(θ) = w0 · (3/4) · chi_A · ln(1/g) · sin²θ,   w0 = γ̄·B0.
+    Vanishes at θ=0, as g→1 (no myelin) or chi_A→0. Ported from
+    hollow_cylinder.freq_axon."""
+    w0 = GAMMA_BAR_HC * B0
+    return w0 * 0.75 * chi_A * np.log(1.0 / g) * np.sin(theta) ** 2
+
+
+def _hc_freq_extra(theta):
+    """Extra-axonal (extracellular) water frequency offset (Hz): reference ≈ 0.
+    Ported from hollow_cylinder.freq_extra."""
+    theta = np.asarray(theta, dtype=float)
+    return np.zeros_like(theta)
+
+
+def _hc_freq_myelin(theta, B0, chi_I, chi_A, g, E):
+    """Myelin (sheath) water frequency offset (Hz), hollow-cylinder annular avg + E:
+
+        Δf_M(θ) = w0 · [ (chi_I/2)(2/3 − sin²θ)
+                         + chi_A(1/12 − (5/12) sin²θ)
+                         + (3/4) chi_A ln(1/g) sin²θ + E ].
+
+    Ported from hollow_cylinder.freq_myelin."""
+    s2 = np.sin(theta) ** 2
+    w0 = GAMMA_BAR_HC * B0
+    iso_term = chi_I * (2.0 / 3.0 - s2) / 2.0
+    aniso_term = chi_A * (1.0 / 12.0 - 5.0 / 12.0 * s2)
+    ln_term = 0.75 * chi_A * np.log(1.0 / g) * s2
+    return w0 * (iso_term + aniso_term + ln_term + E)
+
+
+def hc_compartment_freqs(theta, B0, p=None):
+    """Return (Δf_myelin, Δf_axon, Δf_extra) in Hz for fibre-to-B0 angle ``theta``
+    (radians) at field ``B0`` (T). ``p`` (dict) overrides WM_HC_PARAMS entries.
+
+    Matches hollow_cylinder.compartment_freqs; exposed for tests/verification."""
+    q = dict(WM_HC_PARAMS)
+    if p:
+        q.update(p)
+    return (_hc_freq_myelin(theta, B0, q["chi_I"], q["chi_A"], q["g"], q["E"]),
+            _hc_freq_axon(theta, B0, q["chi_A"], q["g"]),
+            _hc_freq_extra(theta))
+
+
+def hc_mwf_from_myelin_content(chi_neg, chi_neg_ref=-0.10e-6, mwf_ref=0.12,
+                               mwf_min=0.03, mwf_max=0.25):
+    """Map diamagnetic (myelin) susceptibility content χ⁻ to a myelin-water fraction.
+
+    More diamagnetic myelin ⇒ larger MWF. We use a simple monotone-linear mapping,
+    anchored so that the reference myelin content ``chi_neg_ref`` (−0.10 ppm, the
+    prototype's chi_A / chi-sep seed) maps to the prototype's reference MWF (0.12):
+
+        MWF = clip( mwf_ref · |χ⁻| / |χ_neg_ref|,  mwf_min, mwf_max )
+
+    Voxels with little diamagnetic content get the ``mwf_min`` floor (small myelin
+    pool). The clip keeps MWF in a physiological band (≈3–25%). A more biophysical
+    calibration (e.g. a saturating χ⁻→MWF curve, or a per-tract mapping) is a
+    documented TODO; this monotone form is enough to make θ/MWF encode into the
+    signal shape, which is the point of the wired-in model."""
+    frac = mwf_ref * np.abs(chi_neg) / abs(chi_neg_ref)
+    return np.clip(frac, mwf_min, mwf_max)
+
+
+def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None):
+    """Complex hollow-cylinder WM signal at a single echo time ``TE`` (scalar).
+
+    ``theta`` (rad), ``mwf`` and ``bulk_freq`` (Hz) may be scalars or arrays; the
+    result broadcasts to their common shape. Volume fractions come from ``mwf``
+    (myelin) and the ``f_axon`` split of the remaining water. This reproduces
+    hollow_cylinder.gre_signal echo-by-echo (with the same TE/θ/B0/params), and is
+    the per-voxel WM factor used inside :func:`generate_signal`'s multicompartment
+    branch (there ``bulk_freq`` is left 0 because the common field phase is applied
+    by the outer bulk-phase term)."""
+    q = dict(WM_HC_PARAMS)
+    if p:
+        q.update(p)
+    theta = np.asarray(theta, dtype=float)
+    mwf = np.asarray(mwf, dtype=float)
+
+    fM = mwf
+    rest = 1.0 - fM
+    fA = rest * q["f_axon"]
+    fE = rest * (1.0 - q["f_axon"])
+
+    dfM, dfA, dfE = hc_compartment_freqs(theta, B0, q)
+
+    def pool(f, T2, df):
+        return f * np.exp(-TE / T2) * np.exp(2j * np.pi * df * TE)
+
+    S = (pool(fM, q["T2_M"], dfM)
+         + pool(fA, q["T2_A"], dfA)
+         + pool(fE, q["T2_E"], dfE))
+    S = S * np.exp(-q["R2p_meso"] * TE) * np.exp(2j * np.pi * np.asarray(bulk_freq) * TE)
+    return S0 * S
+
+
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
-                    R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False):
+                    R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False,
+                    theta=None, wm_mask=None):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -2008,6 +2178,19 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
         Paramagnetic susceptibility map in ppm. Used with chi-sep model.
     chi_neg : numpy.ndarray or None, optional
         Diamagnetic susceptibility map in ppm. Used with chi-sep model.
+    multicompartment : bool, optional
+        If True (and the chi-sep maps are provided), white-matter voxels use the
+        hollow-cylinder multi-compartment model (see :func:`hc_wm_signal`) so the
+        multi-echo signal carries recoverable fibre-orientation (theta) information;
+        all other voxels keep the single-compartment chi-sep behaviour. Requires
+        ``theta`` and ``wm_mask``. When False the function is byte-identical to the
+        pre-existing single-compartment path. Default is False.
+    theta : numpy.ndarray or None, optional
+        Per-voxel fibre-to-B0 angle in RADIANS (from the V1/DTI ``angle_map``). Only
+        used by the multicompartment WM branch.
+    wm_mask : numpy.ndarray or None, optional
+        Boolean white-matter mask (e.g. ``seg == 8``). Only WM voxels get the
+        hollow-cylinder model. Only used by the multicompartment branch.
 
     Returns
     -------
@@ -2019,23 +2202,27 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
     # Choose decay model
     chisep = R2 is not None and dr_pos is not None and dr_neg is not None and chi_pos is not None and chi_neg is not None
     if chisep and multicompartment:
-        # Multi-compartment (signal-domain) chi-sep model: the voxel magnitude is |Σ compartments|,
-        # each a static-dephasing exponential with its OWN decay rate (R2 + Dr·|chi|) and sphere
-        # frequency ((2/3)·chi·γ·B0). Paramagnetic and diamagnetic compartments beat against each
-        # other, giving the non-mono-exponential magnitude that signal-domain separators (DECOMPOSE)
-        # need. The decay rates use the SAME Dr kernel as generate_r2prime, so the effective R2* (and
-        # thus R2') is unchanged for the R2'-domain methods — only the *shape* of the decay is enriched.
-        # Volume fractions split the susceptibility signal by relative source content (so a pure-para
-        # voxel has no diamagnetic compartment), leaving a neutral (non-source) fraction.
-        w = 2 * np.pi * (2.0 / 3.0) * 42.58 * B0  # (2/3)·γ·B0 phase coeff (per ppm, per s), matching the bulk-phase 42.58
-        tot = np.abs(chi_pos) + np.abs(chi_neg) + 1e-6
-        C_pos = 0.5 * np.abs(chi_pos) / tot
-        C_neg = 0.5 * np.abs(chi_neg) / tot
-        C_0 = 1.0 - C_pos - C_neg
-        S = (C_pos * np.exp(-(R2 + dr_pos * np.abs(chi_pos) + 1j * w * chi_pos) * TE)
-             + C_neg * np.exp(-(R2 + dr_neg * np.abs(chi_neg) + 1j * w * chi_neg) * TE)
-             + C_0 * np.exp(-R2 * TE))
-        decay = np.abs(S)  # multi-compartment magnitude envelope; the bulk field carries the phase below
+        # Hollow-cylinder multi-compartment chi-sep model (see the module-level
+        # block above and prototypes/hollow_cylinder/). WHITE-MATTER voxels get
+        # three theta-dependent water pools (myelin/axonal/extra-axonal), each with
+        # its own T2 and its own hollow-cylinder frequency offset Δf_p(theta); the
+        # pools beat against one another so the multi-echo magnitude is non-mono-
+        # exponential and the phase non-linear, and theta is recoverable from the
+        # signal SHAPE. Volume fractions come from a myelin-water fraction driven by
+        # the diamagnetic (myelin) content χ⁻ (more diamagnetic ⇒ larger MWF), NOT
+        # the old source-content split. NON-WM voxels keep the single-compartment
+        # chi-sep decay, so only white matter is enriched.
+        #
+        # The complex compartment factor replaces the real `decay` envelope; the
+        # common bulk-field phase (and SPGR weighting) below carries the f_bulk term,
+        # so hc_wm_signal is evaluated with bulk_freq=0 here.
+        decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
+        decay = decay.astype(np.complex128)
+        if wm_mask is not None and theta is not None and np.any(wm_mask):
+            wm = np.asarray(wm_mask, dtype=bool)
+            mwf_wm = hc_mwf_from_myelin_content(np.asarray(chi_neg)[wm])
+            theta_wm = np.asarray(theta, dtype=float)[wm]
+            decay[wm] = hc_wm_signal(TE, theta_wm, B0, mwf_wm, bulk_freq=0.0)
     elif chisep:
         # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
         decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
