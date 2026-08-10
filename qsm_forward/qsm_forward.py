@@ -879,6 +879,20 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         se_TR = recon_params.se_TR
         multiecho_se = len(se_TEs) > 1
         se_suffix = "MESE" if multiecho_se else "T2w"
+
+        # Multicompartment WM: the SE must share the GRE's 3-pool T2 core (refocusing
+        # cancels the frequency offsets and mesoscopic R2', leaving the pool-T2 mix),
+        # or the signal-derivable R2' = R2* - R2 in WM drifts from the provided r2prime.
+        se_wm_mask = None
+        if chisep_multicompartment and chi_neg_data is not None:
+            se_wm_mask = (tissue_params.seg.get_fdata() == 8)
+            if np.any(se_wm_mask):
+                se_mwf = hc_mwf_from_myelin_content(np.asarray(chi_neg_data)[se_wm_mask])
+                se_spgr = tissue_params.M0.get_fdata() * (1 - np.exp(-se_TR * tissue_params.R1.get_fdata()))
+                print("  Multi-compartment WM model: SE uses the hollow-cylinder pool-T2 mixture in WM")
+            else:
+                se_wm_mask = None
+
         for i in range(len(se_TEs)):
             print(f"Computing SE signal for echo {i+1}...")
             recon_name_i = f"{recon_name}_echo-{i+1}" if multiecho_se else recon_name
@@ -892,7 +906,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                 R1=tissue_params.R1.get_fdata(),
                 R2=R2_data,
                 M0=tissue_params.M0.get_fdata(),
-            ).astype(np.complex128)
+            )
+            if se_wm_mask is not None:
+                sigHR[se_wm_mask] = se_spgr[se_wm_mask] * hc_wm_se_signal(se_TEs[i], se_mwf)
+            sigHR = sigHR.astype(np.complex128)
 
             # k-space cropping of sigHR
             print(f"k-space cropping of SE signal for echo {i+1}...")
@@ -2142,6 +2159,35 @@ def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None, R2p_meso=Non
     r2p = q["R2p_meso"] if R2p_meso is None else np.asarray(R2p_meso, dtype=float)
     S = S * np.exp(-r2p * TE) * np.exp(2j * np.pi * np.asarray(bulk_freq) * TE)
     return S0 * S
+
+
+def hc_wm_se_signal(TE, mwf, p=None):
+    """Spin-echo WM magnitude factor under the hollow-cylinder 3-pool model.
+
+    The 180° refocusing pulse cancels the compartment frequency offsets AND the
+    mesoscopic (reversible) R2' dephasing, so the SE decay is the plain pool-T2
+    mixture — the multi-exponential decay that myelin-water imaging measures:
+
+        S_SE(TE) = f_M·exp(-TE/T2_M) + f_A·exp(-TE/T2_A) + f_E·exp(-TE/T2_E)
+
+    Volume fractions come from ``mwf`` and the ``f_axon`` split of the remaining
+    water, exactly as in :func:`hc_wm_signal`. Using this for the WM spin-echo when
+    ``chisep_multicompartment`` is on keeps the SE consistent with the
+    multicompartment GRE: the R2* and R2 fits then share the same irreversible pool
+    core, so the signal-derivable R2' = R2* - R2 remains consistent with the
+    provided r2prime map (without this, WM R2' from the signal is inflated by the
+    pool-T2-vs-R2-map gap)."""
+    q = dict(WM_HC_PARAMS)
+    if p:
+        q.update(p)
+    mwf = np.asarray(mwf, dtype=float)
+    fM = mwf
+    rest = 1.0 - fM
+    fA = rest * q["f_axon"]
+    fE = rest * (1.0 - q["f_axon"])
+    return (fM * np.exp(-TE / q["T2_M"])
+            + fA * np.exp(-TE / q["T2_A"])
+            + fE * np.exp(-TE / q["T2_E"]))
 
 
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
