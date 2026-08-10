@@ -842,10 +842,11 @@ class TestHollowCylinderMultiCompartment:
         np.testing.assert_allclose(nonwm_a, nonwm_single, rtol=1e-12, atol=1e-15)
 
     def test_wm_multicompartment_preserves_R2prime(self):
-        """WM keeps its mesoscopic R2' (Dr*|chi|) applied on top of the pool T2s, rather
-        than dropping it — so WM retains its susceptibility contrast and stays consistent
-        with the provided r2prime. Checks (1) hc_wm_signal factorises R2p_meso as
-        exp(-TE*R2'), and (2) generate_signal's WM branch feeds in Dr_pos*|chi+|+Dr_neg*|chi-|."""
+        """WM keeps its PARAMAGNETIC mesoscopic R2' (Dr_pos*|chi+|, iron) applied on top of
+        the pool T2s. The diamagnetic/orientation-dependent reversible dephasing is supplied
+        mechanistically by the pool frequency offsets, so feeding Dr_neg(theta)*|chi-| on top
+        as well would double-count that physics. Checks (1) hc_wm_signal factorises R2p_meso
+        as exp(-TE*R2'), and (2) generate_signal's WM branch feeds in Dr_pos*|chi+| ONLY."""
         B0 = 7.0
         th, mwf = np.deg2rad(50), 0.12
         # (1) factorisation property of hc_wm_signal
@@ -864,7 +865,7 @@ class TestHollowCylinderMultiCompartment:
         wm = np.zeros(shp, bool)
         wm[0, 0, 0] = True
         theta = np.full(shp, th)
-        r2prime = 137.0 * 0.02 + 137.0 * 0.06  # expected source R2' at the WM voxel (Hz)
+        r2prime = 137.0 * 0.02  # expected mesoscopic R2' at the WM voxel: Dr_pos*|chi+| ONLY (Hz)
         kw = dict(B0=7, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin)
         mwf_wm = qsm_forward.hc_mwf_from_myelin_content(-0.06)
 
@@ -902,3 +903,26 @@ class TestHollowCylinderMultiCompartment:
         # broadcasts over an mwf array
         arr = qsm_forward.hc_wm_se_signal(10e-3, np.array([0.05, 0.12, 0.25]))
         assert arr.shape == (3,) and np.all(np.diff(arr) < 0)  # more myelin water => faster SE decay
+
+    def test_hc_wm_r2prime_roundtrip_and_shape(self):
+        """hc_wm_r2prime is exactly the R2' a mono-exponential R2*-minus-R2 pipeline extracts
+        from the noiseless multicompartment pair: fit(|GRE pools + R2p_meso|) - fit(SE mixture)
+        == R2p_meso + hc_wm_r2prime over the same TE grid. And it is the mechanistic
+        orientation dependence: zero at theta=0, monotonically increasing to ~tens of Hz."""
+        TEs = np.arange(1, 17) * 3e-3
+        t = TEs - TEs.mean()
+
+        def fitrate(y):
+            return -np.dot(np.log(np.maximum(y, 1e-12)), t) / np.dot(t, t)
+
+        mwf, B0, r2p_meso = 0.12, 7.0, 2.74
+        for deg in (0, 30, 60, 90):
+            th = np.deg2rad(deg)
+            gre = np.array([np.abs(qsm_forward.hc_wm_signal(te, th, B0, mwf, R2p_meso=r2p_meso))
+                            for te in TEs])
+            se = np.array([qsm_forward.hc_wm_se_signal(te, mwf) for te in TEs])
+            derived = fitrate(gre) - fitrate(se)
+            expected = r2p_meso + qsm_forward.hc_wm_r2prime(th, mwf, TEs, B0=B0)
+            np.testing.assert_allclose(derived, expected, rtol=1e-10, atol=1e-9)
+        vals = qsm_forward.hc_wm_r2prime(np.deg2rad([0.0, 30.0, 60.0, 90.0]), mwf, TEs, B0=B0)
+        assert vals[0] < 0.1 and np.all(np.diff(vals) > 0) and vals[-1] > 10.0
