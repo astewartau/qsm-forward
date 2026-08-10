@@ -880,6 +880,48 @@ class TestHollowCylinderMultiCompartment:
         np.testing.assert_allclose(ratio(TE2) / ratio(TE1),
                                    np.exp(-(TE2 - TE1) * r2prime), rtol=1e-6)
 
+    def test_generate_signal_hc_b0_evaluates_pools_at_effective_field(self):
+        """hc_b0 evaluates the hollow-cylinder pool physics at an effective field
+        while the acquisition stays at B0: the WM signal differs between
+        hc_b0=3 and the default (B0=7), and the hc_b0=3 WM voxel matches a direct
+        hc_wm_signal construction at 3 T with the same theta/MWF/R2p_meso."""
+        shp = (2, 2, 2)
+        field = np.zeros(shp)
+        R2 = np.ones(shp) * 15.0
+        drp = np.ones(shp) * 137.0
+        drn = np.ones(shp) * 137.0
+        chip = np.ones(shp) * 0.02
+        chin = -np.ones(shp) * 0.06
+        wm = np.zeros(shp, bool)
+        wm[0, 0, 0] = True
+        th = np.deg2rad(50)
+        theta = np.full(shp, th)
+        kw = dict(B0=7, R2=R2, dr_pos=drp, dr_neg=drn, chi_pos=chip, chi_neg=chin,
+                  multicompartment=True, theta=theta, wm_mask=wm)
+        TE = 20e-3
+        s_default = qsm_forward.generate_signal(field, TE=TE, **kw)
+        s_hc7 = qsm_forward.generate_signal(field, TE=TE, hc_b0=7.0, **kw)
+        s_hc3 = qsm_forward.generate_signal(field, TE=TE, hc_b0=3.0, **kw)
+
+        # hc_b0=None defaults to B0; hc_b0=7 is then identical, hc_b0=3 is not
+        np.testing.assert_array_equal(s_hc7, s_default)
+        assert not np.isclose(np.abs(s_hc3[0, 0, 0]), np.abs(s_default[0, 0, 0]), rtol=1e-6)
+        # non-WM voxels are untouched by the knob
+        np.testing.assert_allclose(s_hc3[1, 1, 1], s_default[1, 1, 1], rtol=1e-12, atol=1e-15)
+
+        # the hc_b0=3 WM voxel matches a direct hc_wm_signal construction at 3 T
+        mwf_wm = qsm_forward.hc_mwf_from_myelin_content(-0.06)
+        r2p_para = 137.0 * 0.02  # Dr_pos*|chi+| only (Hz)
+
+        def ratio(TEx, hc_b0):
+            g = np.abs(qsm_forward.generate_signal(field, TE=TEx, hc_b0=hc_b0, **kw)[0, 0, 0])
+            pool = np.abs(qsm_forward.hc_wm_signal(TEx, th, 3.0, mwf_wm, R2p_meso=r2p_para))
+            return g / pool  # cancels the M0/T1/flip constant if pools match at 3 T
+
+        TE1, TE2 = 8e-3, 24e-3
+        # TE-independent ratio => the WM factor IS hc_wm_signal(TE, theta, 3.0, mwf, R2p_meso)
+        np.testing.assert_allclose(ratio(TE2, 3.0), ratio(TE1, 3.0), rtol=1e-10)
+
     def test_hc_wm_se_signal_is_pool_t2_mixture(self):
         """The WM spin-echo factor is the refocused 3-pool T2 mixture: no frequency
         offsets, no mesoscopic R2', same volume fractions as hc_wm_signal. This keeps
