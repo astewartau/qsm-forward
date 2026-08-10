@@ -904,6 +904,25 @@ class TestHollowCylinderMultiCompartment:
         arr = qsm_forward.hc_wm_se_signal(10e-3, np.array([0.05, 0.12, 0.25]))
         assert arr.shape == (3,) and np.all(np.diff(arr) < 0)  # more myelin water => faster SE decay
 
+    def test_nan_theta_falls_back_to_single_compartment(self):
+        """A WM voxel with NaN theta (no fibre direction in V1) gets the single-compartment
+        chi-sep decay instead of a NaN (previously silently zeroed by the NaN catch, leaving
+        noise-only voxels)."""
+        shp = (2, 2, 2)
+        field = np.zeros(shp)
+        kw = dict(B0=7, R2=np.full(shp, 15.0), dr_pos=np.full(shp, 137.0),
+                  dr_neg=np.full(shp, 137.0), chi_pos=np.full(shp, 0.02),
+                  chi_neg=np.full(shp, -0.06))
+        wm = np.ones(shp, bool)
+        theta = np.full(shp, np.deg2rad(50.0))
+        theta[0, 0, 0] = np.nan
+        mc = qsm_forward.generate_signal(field, TE=12e-3, multicompartment=True,
+                                         theta=theta, wm_mask=wm, **kw)
+        single = qsm_forward.generate_signal(field, TE=12e-3, multicompartment=False, **kw)
+        assert np.isfinite(mc).all()
+        np.testing.assert_allclose(np.abs(mc[0, 0, 0]), np.abs(single[0, 0, 0]), rtol=1e-12)
+        assert not np.isclose(np.abs(mc[1, 1, 1]), np.abs(single[1, 1, 1]), rtol=1e-6)
+
     def test_hc_wm_r2prime_roundtrip_and_shape(self):
         """hc_wm_r2prime is exactly the R2' a mono-exponential R2*-minus-R2 pipeline extracts
         from the noiseless multicompartment pair: fit(|GRE pools + R2p_meso|) - fit(SE mixture)
