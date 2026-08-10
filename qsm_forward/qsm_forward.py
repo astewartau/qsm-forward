@@ -559,7 +559,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -695,7 +695,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                     dr_pos_wm = (rp_pos[wm_r2p] if np.ndim(rp_pos) else rp_pos)
                     r2prime_data[wm_r2p] = (
                         dr_pos_wm * np.abs(chi_pos_nii.get_fdata()[wm_r2p])
-                        + hc_wm_r2prime(theta_r2p, mwf_r2p, np.asarray(recon_params.TEs)))
+                        + hc_wm_r2prime(theta_r2p, mwf_r2p, np.asarray(recon_params.TEs),
+                                        B0=(chisep_hc_b0 if chisep_hc_b0 is not None else recon_params.B0)))
                     print("  Multi-compartment WM model: WM R2' = Dr+*|chi+| + hollow-cylinder pool interference")
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
@@ -802,6 +803,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                 print("  Multi-compartment WM model: using V1-derived theta for hollow-cylinder pools")
             else:
                 print("  WARNING: chisep_multicompartment set but no angle_map; WM stays single-compartment")
+            if chisep_hc_b0 is not None and chisep_hc_b0 != recon_params.B0:
+                print(f"  Multi-compartment WM model: hollow-cylinder pools evaluated at B0_eff = {chisep_hc_b0} T")
 
         if save_dr_pos or save_dr_neg:
             # Broadcast scalar kernels to masked constant maps for saving
@@ -850,6 +853,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             multicompartment=chisep_multicompartment,
             theta=theta_data,
             wm_mask=wm_mask_data,
+            hc_b0=chisep_hc_b0,
         )
     
         # k-space cropping of sigHR
@@ -2280,7 +2284,7 @@ def hc_wm_se_signal(TE, mwf, p=None):
 
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
                     R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False,
-                    theta=None, wm_mask=None):
+                    theta=None, wm_mask=None, hc_b0=None):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -2332,6 +2336,13 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
     wm_mask : numpy.ndarray or None, optional
         Boolean white-matter mask (e.g. ``seg == 8``). Only WM voxels get the
         hollow-cylinder model. Only used by the multicompartment branch.
+    hc_b0 : float or None, optional
+        Effective field strength (T) at which the hollow-cylinder pool physics is
+        evaluated; the acquisition (bulk-field phase) stays at ``B0``. The pool
+        frequency offsets scale with field, so at 7 T they imply a WM R2' far
+        above the phantom's field-independent Dr=137 calibration scale — this
+        knob lets the pool interference be evaluated at a chosen effective field.
+        None (default) means use ``B0``. Only used by the multicompartment branch.
 
     Returns
     -------
@@ -2372,7 +2383,10 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
             # the same physics — the shipped WM r2prime is instead Dr_pos*|chi+| plus the
             # analytic pool-interference equivalent (see hc_wm_r2prime / generate_bids).
             r2p_para = dr_pos * np.abs(chi_pos)
-            decay[wm] = hc_wm_signal(TE, theta_wm, B0, mwf_wm, bulk_freq=0.0,
+            # The pool physics may be evaluated at an effective field (hc_b0) while
+            # the acquisition (bulk-field phase above) stays at B0.
+            b0_hc = B0 if hc_b0 is None else hc_b0
+            decay[wm] = hc_wm_signal(TE, theta_wm, b0_hc, mwf_wm, bulk_freq=0.0,
                                      R2p_meso=np.asarray(r2p_para, dtype=float)[wm])
     elif chisep:
         # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
