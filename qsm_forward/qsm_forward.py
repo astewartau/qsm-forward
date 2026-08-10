@@ -2124,16 +2124,22 @@ def hc_mwf_from_myelin_content(chi_neg, chi_neg_ref=-0.10e-6, mwf_ref=0.12,
     return np.clip(frac, mwf_min, mwf_max)
 
 
-def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None):
+def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None, R2p_meso=None):
     """Complex hollow-cylinder WM signal at a single echo time ``TE`` (scalar).
 
-    ``theta`` (rad), ``mwf`` and ``bulk_freq`` (Hz) may be scalars or arrays; the
-    result broadcasts to their common shape. Volume fractions come from ``mwf``
-    (myelin) and the ``f_axon`` split of the remaining water. This reproduces
+    ``theta`` (rad), ``mwf``, ``bulk_freq`` (Hz) and ``R2p_meso`` (Hz) may be scalars
+    or arrays; the result broadcasts to their common shape. Volume fractions come from
+    ``mwf`` (myelin) and the ``f_axon`` split of the remaining water. This reproduces
     hollow_cylinder.gre_signal echo-by-echo (with the same TE/θ/B0/params), and is
     the per-voxel WM factor used inside :func:`generate_signal`'s multicompartment
     branch (there ``bulk_freq`` is left 0 because the common field phase is applied
-    by the outer bulk-phase term)."""
+    by the outer bulk-phase term).
+
+    ``R2p_meso`` is the mesoscopic reversible dephasing rate R2' (Hz) applied on top of
+    the compartment T2 decay. Pass the phantom's source R2' (Dr_pos*|chi+| +
+    Dr_neg*|chi-|) so WM keeps its susceptibility contrast and stays consistent with the
+    provided r2prime map — the pool T2s carry the irreversible R2, R2' carries the
+    reversible part. Defaults to ``WM_HC_PARAMS['R2p_meso']`` when None."""
     q = dict(WM_HC_PARAMS)
     if p:
         q.update(p)
@@ -2153,7 +2159,8 @@ def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None):
     S = (pool(fM, q["T2_M"], dfM)
          + pool(fA, q["T2_A"], dfA)
          + pool(fE, q["T2_E"], dfE))
-    S = S * np.exp(-q["R2p_meso"] * TE) * np.exp(2j * np.pi * np.asarray(bulk_freq) * TE)
+    r2p = q["R2p_meso"] if R2p_meso is None else np.asarray(R2p_meso, dtype=float)
+    S = S * np.exp(-r2p * TE) * np.exp(2j * np.pi * np.asarray(bulk_freq) * TE)
     return S0 * S
 
 
@@ -2242,7 +2249,12 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
             wm = np.asarray(wm_mask, dtype=bool)
             mwf_wm = hc_mwf_from_myelin_content(np.asarray(chi_neg)[wm])
             theta_wm = np.asarray(theta, dtype=float)[wm]
-            decay[wm] = hc_wm_signal(TE, theta_wm, B0, mwf_wm, bulk_freq=0.0)
+            # Keep WM's mesoscopic R2' (the source susceptibility dephasing) — the pool T2s carry the
+            # irreversible R2, R2' is applied on top — so WM retains its susceptibility contrast and
+            # stays consistent with the provided r2prime = Dr_pos*|chi+| + Dr_neg*|chi-|.
+            r2prime = dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
+            decay[wm] = hc_wm_signal(TE, theta_wm, B0, mwf_wm, bulk_freq=0.0,
+                                     R2p_meso=np.asarray(r2prime, dtype=float)[wm])
     elif chisep:
         # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
         decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
