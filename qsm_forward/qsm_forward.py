@@ -678,6 +678,22 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             rp_pos = dr if dr_pos_map is None else dr_pos_map
             rp_neg = (dr if dr_neg is None else dr_neg) if dr_neg_map is None else dr_neg_map
             r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr=rp_pos, dr_neg=rp_neg)
+            if chisep_multicompartment and tissue_params.angle_map is not None:
+                # Multicompartment WM: the hollow-cylinder pool interference mechanistically
+                # supplies the diamagnetic/orientation-dependent reversible dephasing (the
+                # signal keeps only the paramagnetic Dr+*|chi+| as R2p_meso), so the shipped
+                # WM R2' is Dr+*|chi+| plus the analytic mono-exponential-equivalent of the
+                # pool interference over the acquisition's TE grid — NOT the Dr-(theta)*|chi-|
+                # approximation, which would double-count the same physics.
+                wm_r2p = (tissue_params.seg.get_fdata() == 8)
+                if np.any(wm_r2p):
+                    theta_r2p = np.deg2rad(tissue_params.angle_map.get_fdata().astype(np.float64))[wm_r2p]
+                    mwf_r2p = hc_mwf_from_myelin_content(chi_neg_nii.get_fdata()[wm_r2p])
+                    dr_pos_wm = (rp_pos[wm_r2p] if np.ndim(rp_pos) else rp_pos)
+                    r2prime_data[wm_r2p] = (
+                        dr_pos_wm * np.abs(chi_pos_nii.get_fdata()[wm_r2p])
+                        + hc_wm_r2prime(theta_r2p, mwf_r2p, np.asarray(recon_params.TEs)))
+                    print("  Multi-compartment WM model: WM R2' = Dr+*|chi+| + hollow-cylinder pool interference")
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
             nib.save(resize(r2prime_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
@@ -2181,6 +2197,34 @@ def hc_wm_signal(TE, theta, B0, mwf, bulk_freq=0.0, S0=1.0, p=None, R2p_meso=Non
     return S0 * S
 
 
+def hc_wm_r2prime(theta, mwf, TEs, B0=7.0, p=None):
+    """Analytic mono-exponential-equivalent reversible dephasing rate (Hz) of the
+    hollow-cylinder pool interference, over the acquisition's TE grid.
+
+    The pools' static frequency offsets dephase against one another in a gradient
+    echo but are refocused by a spin echo — a reversible (R2'-type) decay that IS the
+    mechanistic origin of WM's orientation-dependent R2'. This returns the log-linear
+    fit rate of |hc GRE pools| / (SE pool mixture) over ``TEs``, i.e. exactly the R2'
+    a mono-exponential R2*-minus-R2 pipeline would extract from the noiseless
+    multicompartment signal (beyond any R2p_meso applied on top). Use it to build a
+    shipped r2prime map that is consistent with the multicompartment signal instead
+    of double-counting the myelin contribution with a Dr-(theta)*|chi-| term.
+
+    ``theta`` (rad) and ``mwf`` may be arrays (broadcast together); returns their
+    common shape."""
+    theta = np.asarray(theta, dtype=float)
+    mwf = np.asarray(mwf, dtype=float)
+    TEs = np.asarray(TEs, dtype=float)
+    t = TEs - TEs.mean()
+    denom = (t ** 2).sum()
+    acc = 0.0
+    for te, tc in zip(TEs, t):
+        ratio = np.abs(hc_wm_signal(te, theta, B0, mwf, R2p_meso=0.0, p=p)) \
+            / np.maximum(hc_wm_se_signal(te, mwf, p=p), 1e-12)
+        acc = acc + np.log(np.maximum(ratio, 1e-12)) * tc
+    return np.maximum(-acc / denom, 0.0)
+
+
 def hc_wm_se_signal(TE, mwf, p=None):
     """Spin-echo WM magnitude factor under the hollow-cylinder 3-pool model.
 
@@ -2295,12 +2339,15 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
             wm = np.asarray(wm_mask, dtype=bool)
             mwf_wm = hc_mwf_from_myelin_content(np.asarray(chi_neg)[wm])
             theta_wm = np.asarray(theta, dtype=float)[wm]
-            # Keep WM's mesoscopic R2' (the source susceptibility dephasing) — the pool T2s carry the
-            # irreversible R2, R2' is applied on top — so WM retains its susceptibility contrast and
-            # stays consistent with the provided r2prime = Dr_pos*|chi+| + Dr_neg*|chi-|.
-            r2prime = dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
+            # WM keeps only the PARAMAGNETIC mesoscopic R2' (Dr_pos*|chi+|, iron) on top of the
+            # pools: the diamagnetic/orientation-dependent reversible dephasing is supplied
+            # MECHANISTICALLY by the pool frequency offsets (they dephase in the GRE and are
+            # refocused in the SE). Adding Dr_neg(theta)*|chi-| on top as well would double-count
+            # the same physics — the shipped WM r2prime is instead Dr_pos*|chi+| plus the
+            # analytic pool-interference equivalent (see hc_wm_r2prime / generate_bids).
+            r2p_para = dr_pos * np.abs(chi_pos)
             decay[wm] = hc_wm_signal(TE, theta_wm, B0, mwf_wm, bulk_freq=0.0,
-                                     R2p_meso=np.asarray(r2prime, dtype=float)[wm])
+                                     R2p_meso=np.asarray(r2p_para, dtype=float)[wm])
     elif chisep:
         # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
         decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
