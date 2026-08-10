@@ -658,24 +658,21 @@ class TestCLINewFlags:
 # and the WM magnitude is non-mono-exponential (the property that makes theta
 # recoverable). Also checks the flag is inert when off / on non-WM voxels.
 # ---------------------------------------------------------------------------
-_PROTO_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "prototypes", "hollow_cylinder",
-)
-_HAVE_PROTO = os.path.isfile(os.path.join(_PROTO_DIR, "hollow_cylinder.py"))
-
-
+# The golden reference is a committed COPY of the validated hollow-cylinder prototype
+# (tests/_hollow_cylinder_ref.py) — an independent implementation of the closed-form
+# physics, NOT the code under test. Committing it here means these tests always run
+# (in CI / a fresh clone / an isolated worktree), instead of silently skipping when the
+# research `prototypes/` dir is absent.
 def _load_prototype():
-    """Import the read-only prototype module by path (it is not a package)."""
+    """Import the committed golden-reference hollow-cylinder module (by path; not a package)."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "hollow_cylinder_proto", os.path.join(_PROTO_DIR, "hollow_cylinder.py"))
+    ref = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_hollow_cylinder_ref.py")
+    spec = importlib.util.spec_from_file_location("hollow_cylinder_ref", ref)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-@pytest.mark.skipif(not _HAVE_PROTO, reason="hollow_cylinder prototype not present")
 class TestHollowCylinderMultiCompartment:
     def test_compartment_freqs_match_prototype(self):
         """The three compartment frequencies must match hollow_cylinder.py to ~1e-6 Hz
