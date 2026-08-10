@@ -685,7 +685,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                 # WM R2' is Dr+*|chi+| plus the analytic mono-exponential-equivalent of the
                 # pool interference over the acquisition's TE grid — NOT the Dr-(theta)*|chi-|
                 # approximation, which would double-count the same physics.
-                wm_r2p = (tissue_params.seg.get_fdata() == 8)
+                # Same WM set as the signal: seg==8 AND a finite fibre angle (NaN = no fibre
+                # direction => no enrichment, voxel keeps the Dr-based generate_r2prime value).
+                wm_r2p = (tissue_params.seg.get_fdata() == 8) \
+                    & np.isfinite(tissue_params.angle_map.get_fdata())
                 if np.any(wm_r2p):
                     theta_r2p = np.deg2rad(tissue_params.angle_map.get_fdata().astype(np.float64))[wm_r2p]
                     mwf_r2p = hc_mwf_from_myelin_content(chi_neg_nii.get_fdata()[wm_r2p])
@@ -790,7 +793,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if chisep_multicompartment:
             wm_mask_data = (tissue_params.seg.get_fdata() == 8)
             if tissue_params.angle_map is not None:
-                theta_data = np.deg2rad(tissue_params.angle_map.get_fdata().astype(np.float64))
+                theta_raw = tissue_params.angle_map.get_fdata().astype(np.float64)
+                # V1-derived angle maps are NaN where there is no fibre direction (V1 = 0);
+                # such voxels get NO hollow-cylinder enrichment (single-compartment fallback in
+                # GRE, SE and the shipped r2prime alike) rather than a NaN signal.
+                wm_mask_data &= np.isfinite(theta_raw)
+                theta_data = np.deg2rad(np.nan_to_num(theta_raw))
                 print("  Multi-compartment WM model: using V1-derived theta for hollow-cylinder pools")
             else:
                 print("  WARNING: chisep_multicompartment set but no angle_map; WM stays single-compartment")
@@ -900,8 +908,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         # cancels the frequency offsets and mesoscopic R2', leaving the pool-T2 mix),
         # or the signal-derivable R2' = R2* - R2 in WM drifts from the provided r2prime.
         se_wm_mask = None
-        if chisep_multicompartment and chi_neg_data is not None:
-            se_wm_mask = (tissue_params.seg.get_fdata() == 8)
+        if chisep_multicompartment and chi_neg_data is not None and tissue_params.angle_map is not None:
+            # Same WM set as the GRE branch (seg==8 with a finite fibre angle) so GRE, SE and
+            # the shipped r2prime stay mutually consistent voxel-by-voxel.
+            se_wm_mask = (tissue_params.seg.get_fdata() == 8) \
+                & np.isfinite(tissue_params.angle_map.get_fdata())
             if np.any(se_wm_mask):
                 se_mwf = hc_mwf_from_myelin_content(np.asarray(chi_neg_data)[se_wm_mask])
                 se_spgr = tissue_params.M0.get_fdata() * (1 - np.exp(-se_TR * tissue_params.R1.get_fdata()))
@@ -2316,7 +2327,9 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
         decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
         decay = decay.astype(np.complex128)
         if wm_mask is not None and theta is not None and np.any(wm_mask):
-            wm = np.asarray(wm_mask, dtype=bool)
+            # Voxels without a finite fibre angle keep the single-compartment decay
+            # (defensive: V1-derived angle maps are NaN where there is no fibre direction).
+            wm = np.asarray(wm_mask, dtype=bool) & np.isfinite(np.asarray(theta, dtype=float))
             mwf_wm = hc_mwf_from_myelin_content(np.asarray(chi_neg)[wm])
             theta_wm = np.asarray(theta, dtype=float)[wm]
             # WM keeps only the PARAMAGNETIC mesoscopic R2' (Dr_pos*|chi+|, iron) on top of the
