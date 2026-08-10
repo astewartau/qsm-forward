@@ -2129,15 +2129,28 @@ def hc_compartment_freqs(theta, B0, p=None):
             _hc_freq_extra(theta))
 
 
-def hc_mwf_from_myelin_content(chi_neg, chi_neg_ref=-0.10e-6, mwf_ref=0.12,
+def hc_mwf_from_myelin_content(chi_neg, chi_neg_ref=-0.038, mwf_ref=0.12,
                                mwf_min=0.03, mwf_max=0.25):
-    """Map diamagnetic (myelin) susceptibility content χ⁻ to a myelin-water fraction.
+    """Map diamagnetic (myelin) susceptibility content χ⁻ (in PPM) to a
+    myelin-water fraction.
+
+    ``chi_neg`` and ``chi_neg_ref`` are in ppm — the unit of the phantom's
+    susceptibility maps and of every caller in this module. (The original default
+    reference was written in SI, −0.10e-6; fed ppm inputs, the ratio blew up by
+    ~1e6 and every WM voxel clipped to ``mwf_max``, flattening all myelin-driven
+    texture.)
 
     More diamagnetic myelin ⇒ larger MWF. We use a simple monotone-linear mapping,
-    anchored so that the reference myelin content ``chi_neg_ref`` (−0.10 ppm, the
-    prototype's chi_A / chi-sep seed) maps to the prototype's reference MWF (0.12):
+    anchored so that the Ridani-phantom WM-mean myelin content ``chi_neg_ref``
+    (−0.038 ppm) maps to the reference MWF (0.12):
 
         MWF = clip( mwf_ref · |χ⁻| / |χ_neg_ref|,  mwf_min, mwf_max )
+
+    The anchor is deliberately the phantom's WM mean rather than the prototype's
+    −0.10 ppm chi-sep seed: with the −0.10 ppm anchor a WM-mean voxel would land
+    at MWF ≈ 0.05, below the physiological ≈0.10–0.15 band, whereas anchoring the
+    WM-mean χ⁻ to 0.12 centres WM at a physiological MWF with spread coming from
+    the χ⁻ texture.
 
     Voxels with little diamagnetic content get the ``mwf_min`` floor (small myelin
     pool). The clip keeps MWF in a physiological band (≈3–25%). A more biophysical

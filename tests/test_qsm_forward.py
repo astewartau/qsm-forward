@@ -754,15 +754,16 @@ class TestHollowCylinderMultiCompartment:
         assert not np.allclose(s30 / s30[0], s80 / s80[0], atol=1e-3)
 
     def test_mwf_mapping_monotone_and_anchored(self):
-        """MWF grows with diamagnetic (myelin) content; the reference chi- (-0.10 ppm)
-        maps to the prototype reference MWF (0.12); values stay in a physiological band."""
+        """MWF grows with diamagnetic (myelin) content; inputs are in PPM and the
+        reference chi- (-0.038 ppm, the Ridani-phantom WM mean) maps to the
+        reference MWF (0.12); values stay in a physiological band."""
         f = qsm_forward.hc_mwf_from_myelin_content
-        np.testing.assert_allclose(float(f(-0.10e-6)), 0.12, atol=1e-9)
-        # monotone increasing in |chi-|
-        vals = [float(f(-c * 1e-6)) for c in (0.02, 0.05, 0.10, 0.15, 0.20)]
+        np.testing.assert_allclose(float(f(-0.038)), 0.12, atol=1e-9)
+        # monotone increasing in |chi-| (ppm)
+        vals = [float(f(-c)) for c in (0.01, 0.02, 0.038, 0.06, 0.10)]
         assert all(b >= a for a, b in zip(vals, vals[1:]))
-        # clipped to physiological band
-        arr = f(np.array([-0.0, -0.01e-6, -0.5e-6, -1.0e-6]))
+        # clipped to physiological band (ppm inputs)
+        arr = f(np.array([-0.0, -0.005, -0.10, -0.25]))
         assert np.all(arr >= 0.03) and np.all(arr <= 0.25)
 
     def test_generate_signal_flag_off_byte_identical(self):
