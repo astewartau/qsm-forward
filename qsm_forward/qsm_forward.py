@@ -772,6 +772,19 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             if save_dr_neg:
                 nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_neg_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
 
+    # Longitudinal relaxation for the signal. At 3T the reference swaps in the R1_3T map
+    # (Map_creation_3T.m per-region division factors, loaded by GRESimulation.m when B0==3);
+    # R2/T2 are already field-scaled inside generate_t2_map, and the Ridani Dr maps are
+    # generated at the target B0, so R1 is the remaining field-dependent signal input.
+    R1_data = tissue_params.R1.get_fdata()
+    if chisep_signal and recon_params.B0 == 3:
+        print("Applying R1_3T per-region scaling for B0=3 (Map_creation_3T.m)...")
+        seg_for_r1 = tissue_params.seg.get_fdata()
+        for label, factor in R1_3T_DIVISION_FACTORS.items():
+            m = seg_for_r1 == label
+            if m.any():
+                R1_data[m] = R1_data[m] / factor
+
     # signal model
     multiecho = len(recon_params.TEs) > 1
     for i in range(len(recon_params.TEs)):
@@ -785,7 +798,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             TE=recon_params.TEs[i],
             flip_angle=recon_params.flip_angle,
             phase_offset=phase_offset,
-            R1=tissue_params.R1.get_fdata(),
+            R1=R1_data,
             R2star=tissue_params.R2star.get_fdata(),
             M0=tissue_params.M0.get_fdata(),
             R2=R2_data,
@@ -870,7 +883,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             sigHR = generate_se_signal(
                 TR=se_TR,
                 TE=se_TEs[i],
-                R1=tissue_params.R1.get_fdata(),
+                R1=R1_data,
                 R2=R2_data,
                 M0=tissue_params.M0.get_fdata(),
             ).astype(np.complex128)
@@ -1228,7 +1241,10 @@ def generate_dr_maps_ridani(seg, theta, B0=7, anisotropic=True, dr_fixed=None):
         drneg[np.isnan(drneg)] = 0
         dr_neg_map[wm] = drneg[wm]
     else:
-        dr_neg_map[wm] = 700.8
+        # calculate_Dr.m hard-codes 700.8 at its fixed B0=7; the reference reaches other
+        # fields by scaling Dr in the signal (GRESimulation.m multiplies by 3/7 at 3T),
+        # so the field-consistent constant is 700.8 * (B0/7).
+        dr_neg_map[wm] = 700.8 * (B0 / 7.0)
 
     if dr_fixed is not None:
         scale = dr_fixed / value_positive
@@ -1549,7 +1565,7 @@ def generate_theta_from_v1(v1, B0_dir=np.array([0, 0, 1]), mask=None):
 
 def apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=None, seg=None,
                         tract_params=None, region8_r1_weighting=True,
-                        noise_std=0.01, noise_seed=0):
+                        noise_mean=-0.04, noise_std=0.05, noise_seed=0):
     """
     Apply per-tract white-matter susceptibility anisotropy to chi- (the "Apparent
     susceptibility" block of PhantomCreation.m).
@@ -1581,10 +1597,14 @@ def apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=None, seg=None,
     region8_r1_weighting : bool
         If True and R1 and seg are given, apply the R1-percentage texture in
         SegmentedModel region 8.
-    noise_std : float
-        Standard deviation of the Gaussian noise added to the R1-percentage term
-        at each of the three iterations (PhantomCreation.m uses 0.01). Set to 0 to
-        apply the deterministic R1-percentage term only.
+    noise_mean, noise_std : float
+        Mean and standard deviation of the Gaussian noise added to the
+        R1-percentage term at each of the three iterations. Defaults (-0.04, 0.05)
+        are the eta ~ N(-0.04, 0.05) of Ridani et al. (MRM 10.1002/mrm.70468) —
+        the published GitHub PhantomCreation.m instead uses N(0, 0.01), but the
+        paper's OSF ground truth is only consistent with the paper's parameters
+        (fitted magnitude scale 0.92 ~= (1-0.04)^3 and residual scatter 0.0038 ~=
+        sqrt(3)*0.05*|chi|). Set noise_std=0 for the deterministic term only.
     noise_seed : int or None
         Seed for the noise generator, so the (otherwise random) texture is
         reproducible. Default 0. Ignored when ``noise_std`` is 0 or None.
@@ -1615,10 +1635,10 @@ def apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=None, seg=None,
 
     xapp = delta_map * (np.cos(theta * np.pi / 180.0) ** 2) + xzero_map
 
-    # Region-8 (WM in SegmentedModel) R1-percentage weighting. PhantomCreation.m
-    # iterates xapp *= (pct + N(0, noise_std)) three times, where pct = R1/mean(R1)
-    # over the region. The noise generator is seeded (noise_seed) so the texture is
-    # reproducible.
+    # Region-8 (WM in SegmentedModel) R1-percentage weighting: three iterations of
+    # xapp *= (pct + N(noise_mean, noise_std)), where pct = R1/mean(R1) over the
+    # region. The noise generator is seeded (noise_seed) so the texture is
+    # reproducible (the reference's normrnd is unseeded).
     region8 = (seg == 8) if seg is not None else tract_union
     if region8_r1_weighting and R1 is not None and seg is not None:
         R1 = np.asarray(R1, dtype=np.float64)
@@ -1629,7 +1649,7 @@ def apply_wm_anisotropy(chi_neg, wm_tract_mask, theta, R1=None, seg=None,
                 pct[region8] = R1[region8] / mean_r1
                 rng = np.random.default_rng(noise_seed) if noise_std else None
                 for _ in range(3):
-                    weight = pct if not noise_std else pct + rng.normal(0.0, noise_std, size=pct.shape)
+                    weight = pct if not noise_std else pct + rng.normal(noise_mean, noise_std, size=pct.shape)
                     xapp = np.where(region8, xapp * weight, xapp)
 
     # Replace chi- in the SegmentedModel WM (label 8), exactly as PhantomCreation.m
