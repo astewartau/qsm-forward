@@ -4,7 +4,7 @@ This package provides a Python API and CLI for simulating input data for Quantit
 
 Based on Marques, J. P., et al. (2021). QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and evaluation of susceptibility mapping procedures. Magnetic Resonance in Medicine, 86(1), 526-542. https://doi.org/10.1002/mrm.28716
 
-The optional chi-separation model (paramagnetic/diamagnetic susceptibility splitting, per-tissue χ⁺/χ⁻ reference values, white-matter anisotropy, and the chi-sep-aware GRE signal, T2/R2, Dr, R2′ and 3T-scaling maps) is a Python port of the [Susceptibility-Separation-Phantom](https://github.com/neuropoly/Susceptibility-Separation-Phantom) (MIT, © NeuroPoly 2024). Per-tissue χ⁺/χ⁻ and white-matter anisotropy values are taken from that phantom's `data/chimodel/SusceptibilityValues.mat` and README Tables 1–2. If you use these features, please also cite Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation. bioRxiv. https://doi.org/10.64898/2026.04.07.716972. See the [`NOTICE`](NOTICE) file for full attribution.
+The optional chi-separation model (paramagnetic/diamagnetic susceptibility splitting, per-tissue χ⁺/χ⁻ reference values, white-matter anisotropy, and the chi-sep-aware GRE signal, T2/R2, Dr, R2′ and 3T-scaling maps) is a Python port of the [Susceptibility-Separation-Phantom](https://github.com/neuropoly/Susceptibility-Separation-Phantom) (MIT, © NeuroPoly 2024). Per-tissue χ⁺/χ⁻ and white-matter anisotropy values are taken from that phantom's `data/chimodel/SusceptibilityValues.mat` and README Tables 1–2. If you use these features, please also cite Ridani, D., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation. Magnetic Resonance in Medicine. https://doi.org/10.1002/mrm.70468. See the [`NOTICE`](NOTICE) file for full attribution.
 
 Includes code for:
 
@@ -244,6 +244,18 @@ On the left is the phase image with the two sources with an axial B0 direction. 
 
 The optional chi-separation model splits total susceptibility into paramagnetic (χ⁺, e.g. iron) and diamagnetic (χ⁻, e.g. myelin/calcium) components and derives the associated relaxation maps. When you don't supply explicit χ⁺/χ⁻ maps, they are derived from the phantom's tissue segmentation using per-tissue reference values (see the attribution note above). Passing `chisep_signal=True` additionally switches the MEGRE magnitude to the chi-sep-aware signal model (R2 + Dr·|χ|) instead of R2*.
 
+The dedicated `chi-sep` CLI subcommand reproduces the Ridani et al. (2026) source-separation phantom directly — orientation-dependent white-matter relaxivity and all — from a head-phantom data directory:
+
+```
+qsm-forward chi-sep ~/data bids --B0 7 --voxel-size 1 1 1 --peak-snr 100 --save-se
+# --dr-model {fixed,scaled}    relaxivity magnitude (default fixed; see "How the model works")
+# --isotropic                  disable white-matter anisotropy (constant Dr-)
+# --chisep-multicompartment    hollow-cylinder WM signal (θ recoverable from the beat)
+# --no-brain-mask              simulate the whole head (keep the background field)
+```
+
+The Python `generate_bids(...)` example below shows the lower-level API (a single Dr kernel, no orientation dependence); the `chi-sep` subcommand wraps `generate_dr_maps_ridani` to build the source- and orientation-dependent relaxivity described later.
+
 ```python
 import qsm_forward
 import numpy as np
@@ -331,21 +343,23 @@ A **single kernel** is shared by both source types: in the static-dephasing regi
 
 Modelling R2 independently (rather than tying it to R2′ by a fixed ratio, R2\* ≈ κ·R2′ with κ ≈ 1.9; Dimov et al., 2022) keeps the two from being collinear, so recovering R2′ = R2\* − R2 stays a realistic problem and R2 carries its own tissue information. A split kernel (Dr⁺ ≠ Dr⁻) is biophysically defensible but not recoverable from a single χ and R2′ map, so it is left as an explicit opt-in for sensitivity studies (`dr_neg` / `--dr-neg`).
 
+**Source- and orientation-dependent relaxivity (`chi-sep` subcommand).** The Ridani et al. (2026) phantom replaces the single kernel above with distinct paramagnetic and diamagnetic relaxivities from the static-dephasing geometry — spheres for iron, parallel cylinders for myelin — so R2′ becomes
+
+```
+R2′ = Dr⁺·|χ⁺| + Dr⁻(θ)·|χ⁻|,     Dr⁻(θ) ∝ sin²θ
+```
+
+where θ is the angle between the white-matter fibre (from the diffusion V1 eigenvector) and B0. `generate_dr_maps_ridani` builds these maps with two magnitude conventions, selected by `--dr-model`: **scaled** uses the theoretical static-dephasing values, Dr⁺ = 107.84·B0 and Dr⁻ = 133.77·sin²θ·B0 Hz/ppm, which grow with field; **fixed** (default) rescales both so Dr⁺ equals the empirical Dr = 137 Hz/ppm (Shin et al., 2021), field-independent. `--isotropic` drops the θ dependence and uses a constant white-matter Dr⁻. Field strength is handled throughout (`--B0`): at 3 T the R1 map and relaxivities are scaled to that field.
+
+**White-matter anisotropy (`anisotropy` / not `--isotropic`).** Myelin is magnetically anisotropic, so in white matter χ⁻ itself depends on the fibre angle, χ⁻ = Δχ·cos²θ + χ₀ per tract (Δχ the susceptibility anisotropy, χ₀ the isotropic part), with a seeded R1-weighted texture (η ~ N(−0.04, 0.05), per the reference). Because a single-orientation acquisition cannot observe θ, white-matter χ⁻ is the hardest map to recover — which is exactly the error this phantom is built to quantify.
+
 **Chi-sep-aware signal (`chisep_signal`).** This replaces the plain R2\* magnitude decay with the source-separation model, so the magnitude carries R2′ from the source magnitudes rather than a lumped R2\*:
 
 ```
 S(TE) = M0 · exp( −(R2 + Dr·|χ⁺| + Dr·|χ⁻|) · TE )
 ```
 
-**Multi-compartment magnitude (`chisep_multicompartment`).** Field-domain methods only need R2′ and the field, but signal-domain separators (e.g. DECOMPOSE; Chen et al., 2021) fit the multi-echo complex signal per voxel, where a mono-exponential decay carries no information to separate. This option builds the voxel magnitude as the modulus of a sum of compartments:
-
-```
-S(TE) = | C₊·exp(−(R2 + Dr·|χ⁺| + i·ω·χ⁺)·TE)
-        + C₋·exp(−(R2 + Dr·|χ⁻| + i·ω·χ⁻)·TE)
-        + C₀·exp(−R2·TE) |,     ω = (2/3)·γ·B0
-```
-
-Each compartment is a static-dephasing exponential with its own decay rate and off-resonance, so the paramagnetic and diamagnetic pools beat against each other and produce a non-mono-exponential magnitude. The compartment decay rates reuse the **same Dr kernel** as R2′, so the effective R2\* (and thus R2′) is unchanged — field-domain methods see identical inputs, and only the *shape* of the decay is enriched. It implies `chisep_signal` and defaults to off.
+**Multi-compartment magnitude (`chisep_multicompartment`).** Field-domain methods only need R2′ and the field, but signal-domain separators (e.g. DECOMPOSE; Chen et al., 2021) fit the multi-echo complex signal per voxel, where a mono-exponential decay carries no information to separate — and, more importantly, a scalar θ that only modulates R2′ leaves the fibre orientation unrecoverable from a single-orientation acquisition. With this flag, white matter is modelled as three water pools (myelin, axonal, extra-axonal) with orientation-dependent frequency offsets from the hollow-cylinder model (Wharton & Bowtell, 2012); the pools beat against each other, giving a non-mono-exponential magnitude whose *shape* encodes both θ and the myelin-water fraction, so a method can recover them from the GRE signal alone. Outside white matter the magnitude uses the paramagnetic/diamagnetic static-dephasing beat. The white-matter R2′ is decomposed so the mechanistic pool dephasing supplies the diamagnetic part (rather than being double-counted with the imposed Dr⁻ term), keeping the effective R2\* — and therefore the field-domain inputs — consistent with the non-multicompartment case; only the decay shape is enriched. A matched spin echo shares the same pool cores. Implies `chisep_signal`, requires a fibre-angle map, and defaults to off.
 
 **Matched spin echo (`save_se`).** Optionally simulate a multi-echo spin-echo acquisition whose magnitude decays with R2 alone (the 180° pulse refocuses static dephasing), letting a method recover R2′ = R2\* − R2 itself as it would from real data (Stoll, 2025) instead of reading the shipped R2′ map directly.
 
@@ -355,10 +369,11 @@ If you use qsm-forward, please cite this repository and the head phantom (Marque
 
 - **This software.** Stewart A., et al. *qsm-forward: A QSM forward model for simulating BIDS-compliant magnitude and phase MRI.* https://github.com/astewartau/qsm-forward
 - **Head phantom.** Marques J.P., Meineke J., Milovic C., et al. *QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and evaluation of susceptibility mapping procedures.* Magnetic Resonance in Medicine 2021;86(1):526–542. doi:[10.1002/mrm.28716](https://doi.org/10.1002/mrm.28716). Data: doi:[10.34973/m20r-jt17](https://doi.org/10.34973/m20r-jt17).
-- **Chi-separation phantom (port basis).** Ridani S., De Leener B., Alonso-Ortiz E. *A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation.* bioRxiv 2026. doi:[10.64898/2026.04.07.716972](https://doi.org/10.64898/2026.04.07.716972).
+- **Chi-separation phantom (port basis).** Ridani D., De Leener B., Alonso-Ortiz E. *A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation.* Magnetic Resonance in Medicine 2026. doi:[10.1002/mrm.70468](https://doi.org/10.1002/mrm.70468).
 - **Chi-separation model & Dr.** Shin H.G., Lee J., Yun Y.H., et al. *χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain.* NeuroImage 2021;240:118371. doi:[10.1016/j.neuroimage.2021.118371](https://doi.org/10.1016/j.neuroimage.2021.118371).
 - **Static-dephasing regime (single-kernel rationale).** Yablonskiy D.A., Haacke E.M. *Theory of NMR signal behavior in magnetically inhomogeneous tissues: the static dephasing regime.* Magnetic Resonance in Medicine 1994;32(6):749–763. doi:[10.1002/mrm.1910320610](https://doi.org/10.1002/mrm.1910320610).
 - **Multi-compartment / signal-domain separation (DECOMPOSE).** Chen J., et al. *Decompose quantitative susceptibility mapping (QSM) to sub-voxel diamagnetic and paramagnetic components based on gradient-echo MRI data.* NeuroImage 2021. doi:[10.1016/j.neuroimage.2021.118735](https://doi.org/10.1016/j.neuroimage.2021.118735).
+- **Hollow-cylinder white-matter signal (`chisep_multicompartment`).** Wharton S., Bowtell R. *Fiber orientation-dependent white matter contrast in gradient echo MRI.* PNAS 2012;109(45):18559–18564. doi:[10.1073/pnas.1211075109](https://doi.org/10.1073/pnas.1211075109).
 - **κ (R2\*/R2′) relaxometric constant.** Dimov A.V., Gillen K.M., Nguyen T.D., et al. *Magnetic susceptibility source separation solely from gradient echo data: histological validation.* Tomography 2022;8(3):1544–1551. doi:[10.3390/tomography8030127](https://doi.org/10.3390/tomography8030127).
 - **Spin-echo forward model (`save_se`).** Stoll P. *Development of a Deep Learning Framework for Iron and Myelin Mapping from Quantitative Susceptibility Maps.* MSc thesis, ETH Zurich, 2025.
 
