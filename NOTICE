@@ -21,10 +21,10 @@ This product includes code and data derived from third-party projects:
    data/chimodel/SusceptibilityValues.mat and README Tables 1-2.
 
    Please cite:
-     Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic
+     Ridani, D., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic
      in-silico brain phantom for quantifying susceptibility anisotropy-induced
-     error in susceptibility separation. bioRxiv.
-     https://doi.org/10.64898/2026.04.07.716972
+     error in susceptibility separation. Magnetic Resonance in
+     Medicine. https://doi.org/10.1002/mrm.70468
 
    MIT License text:
 

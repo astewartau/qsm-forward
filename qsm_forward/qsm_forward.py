@@ -25,9 +25,9 @@ chi+ and chi- per tissue from the base values. Per-tissue chi+/chi- values
 phantom's data/chimodel/SusceptibilityValues.mat, PhantomCreation.m and
 calculate_Dr.m. Please additionally cite:
 
-Ridani, S., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain
+Ridani, D., De Leener, B., & Alonso-Ortiz, E. (2026). A realistic in-silico brain
 phantom for quantifying susceptibility anisotropy-induced error in susceptibility
-separation. bioRxiv. https://doi.org/10.64898/2026.04.07.716972
+separation. Magnetic Resonance in Medicine. https://doi.org/10.1002/mrm.70468
 
 You may also cite the repository https://github.com/astewartau/qsm-forward.
 
