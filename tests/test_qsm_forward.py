@@ -290,6 +290,8 @@ class TestFileOutputIntegration:
 
 
 import numpy as np
+import nibabel as nib
+import json
 
 
 class TestGenerateT2Map:
@@ -620,6 +622,38 @@ class TestCLINewFlags:
                 assert call_kwargs['save_dr_pos'] == True
                 assert call_kwargs['save_dr_neg'] == True
                 assert call_kwargs['save_t2'] == True
+
+    def test_multislice_flags_reach_recon_params(self):
+        with patch('sys.argv', ['qsm_forward', 'simple', '/tmp/bids',
+                                '--voxel-size', '1', '1', '3', '--slice-gap', '1.5',
+                                '--slice-phase-offsets', 'interleaved',
+                                '--slice-phase-offset-amplitude', '2.0', '--slice-axis', '2']):
+            from qsm_forward.main import main
+            with patch('qsm_forward.TissueParams') as mock_tp, \
+                 patch('qsm_forward.generate_bids'), \
+                 patch('qsm_forward.ReconParams') as mock_rp, \
+                 patch('qsm_forward.generate_susceptibility_phantom', return_value=np.zeros((10, 10, 10))):
+                mock_tp.return_value = MagicMock()
+                main()
+                rp_kwargs = mock_rp.call_args[1]
+                np.testing.assert_allclose(rp_kwargs['voxel_size'], [1.0, 1.0, 3.0])
+                assert rp_kwargs['slice_gap'] == 1.5
+                assert rp_kwargs['slice_phase_offsets'] == 'interleaved'
+                assert rp_kwargs['slice_phase_offset_amplitude'] == 2.0
+                assert rp_kwargs['slice_axis'] == 2
+
+    def test_multislice_flags_default_to_off(self):
+        with patch('sys.argv', ['qsm_forward', 'simple', '/tmp/bids']):
+            from qsm_forward.main import main
+            with patch('qsm_forward.TissueParams') as mock_tp, \
+                 patch('qsm_forward.generate_bids'), \
+                 patch('qsm_forward.ReconParams') as mock_rp, \
+                 patch('qsm_forward.generate_susceptibility_phantom', return_value=np.zeros((10, 10, 10))):
+                mock_tp.return_value = MagicMock()
+                main()
+                rp_kwargs = mock_rp.call_args[1]
+                assert rp_kwargs['slice_gap'] == 0.0
+                assert rp_kwargs['slice_phase_offsets'] is None
 
     def test_save_se_flag_parsing(self):
         with patch('sys.argv', ['qsm_forward', 'simple', '/tmp/bids',
@@ -988,3 +1022,248 @@ class TestHollowCylinderMultiCompartment:
             np.testing.assert_allclose(derived, expected, rtol=1e-10, atol=1e-9)
         vals = qsm_forward.hc_wm_r2prime(np.deg2rad([0.0, 30.0, 60.0, 90.0]), mwf, TEs, B0=B0)
         assert vals[0] < 0.1 and np.all(np.diff(vals) > 0) and vals[-1] > 10.0
+
+class TestMultiSliceAcquisition:
+    """2D multi-slice simulation: anisotropic slices, per-slice phase offsets, slice gaps."""
+
+    # A single cosine with exactly one cycle across the field of view. It is band-limited and
+    # periodic, so both sampling paths have closed-form answers: k-space cropping to n_out
+    # samples returns cos(2*pi*j/n_out) exactly, and the mean over a slab of T voxels centred
+    # on index c is cos(2*pi*c/N) times the Dirichlet factor below. That lets every assertion
+    # below compare against a value derived on paper rather than from the code under test.
+    @staticmethod
+    def _cosine_volume(n, nxy=6):
+        return np.broadcast_to(np.cos(2 * np.pi * np.arange(n) / n), (nxy, nxy, n)).copy()
+
+    @staticmethod
+    def _cosine_nii(vol):
+        nii = nib.Nifti1Image(vol, np.eye(4))
+        nii.header.set_zooms((1.0, 1.0, 1.0))
+        return nii
+
+    @staticmethod
+    def _slab_mean_cosine(n, start, thickness, pitch, n_slices):
+        centres = start + np.arange(n_slices) * pitch + (thickness - 1) / 2
+        dirichlet = np.sin(np.pi * thickness / n) / (thickness * np.sin(np.pi / n))
+        return np.cos(2 * np.pi * centres / n) * dirichlet
+
+    # ---- grid geometry -------------------------------------------------------------
+
+    def test_grid_reports_the_voxel_size_it_can_actually_sample(self):
+        """The matrix is a whole number, so the achievable slice is FOV/matrix, not the request."""
+        # 64 mm of field of view cannot be cut into 3 mm slices: 21 slices of 3.0476 mm
+        grid = qsm_forward.ReconGrid((6, 6, 64), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0))
+        assert grid.shape == (6, 6, 21)
+        assert grid.voxel_size[2] == pytest.approx(64 / 21)
+        assert grid.voxel_size[2] != pytest.approx(3.0, abs=1e-3)
+        assert grid.slice_gap == 0.0
+
+        # 48 mm does divide evenly, and then the request is honoured exactly
+        grid = qsm_forward.ReconGrid((6, 6, 48), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0))
+        assert grid.shape == (6, 6, 16)
+        assert grid.voxel_size[2] == pytest.approx(3.0)
+
+    def test_signal_and_maps_land_on_the_same_grid(self):
+        """The regression this guards: the signal is sampled on FOV/matrix whatever the affine says.
+
+        Labelling it with the requested size instead leaves the k-space-sampled signal and the
+        interpolated ground-truth maps describing different world grids.
+        """
+        n = 64
+        vol = self._cosine_volume(n)
+        grid = qsm_forward.ReconGrid((6, 6, n), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0))
+        n_out = grid.shape[2]
+
+        # closed form on the grid the acquisition actually samples
+        expected = np.cos(2 * np.pi * np.arange(n_out) / n_out)
+        signal = grid.sample_signal(vol.astype(complex)).real[0, 0]
+        mapped = grid.resample_map(self._cosine_nii(vol)).get_fdata()[0, 0]
+        assert np.abs(signal - expected).max() < 1e-3
+        assert np.abs(mapped - expected).max() < 1e-3
+
+        # and the test can tell the two apart: sampling at the *requested* 3.0 mm pitch, which
+        # is what the affine used to claim, is far outside the tolerance asserted above
+        requested_pitch = np.cos(2 * np.pi * (3.0 * np.arange(n_out)) / n)
+        assert np.abs(requested_pitch - expected).max() > 1e-2
+
+    def test_anisotropic_slices_end_to_end(self):
+        """Thick slices: every output shares one shape, one zoom and one affine."""
+        chi = qsm_forward.generate_susceptibility_phantom(
+            resolution=[32, 32, 48], background=0, large_cylinder_val=0.005,
+            small_cylinder_radii=[3, 3], small_cylinder_vals=[0.1, 0.2])
+        tissue = qsm_forward.TissueParams(chi=chi)
+        recon = qsm_forward.ReconParams(
+            TEs=np.array([4e-3, 12e-3]), voxel_size=np.array([1.0, 1.0, 3.0]),
+            random_seed=None, generate_shim_field=False)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            qsm_forward.generate_bids(tissue, recon, temp_dir, save_field=True)
+            sub = os.path.join(temp_dir, "sub-1", "anat")
+            deriv = os.path.join(temp_dir, "derivatives", "qsm-forward", "sub-1", "anat")
+            names = ["sub-1_echo-1_part-mag_MEGRE.nii", "sub-1_echo-1_part-phase_MEGRE.nii"]
+            paths = [os.path.join(sub, f) for f in names] + [
+                os.path.join(deriv, f) for f in
+                ("sub-1_Chimap.nii", "sub-1_mask.nii", "sub-1_fieldmap.nii")]
+
+            for path in paths:
+                loaded = nib.load(path)
+                assert loaded.shape == (32, 32, 16), f"{os.path.basename(path)}: {loaded.shape}"
+                assert loaded.header.get_zooms()[:3] == pytest.approx((1.0, 1.0, 3.0))
+                assert np.diag(loaded.affine)[:3] == pytest.approx((1.0, 1.0, 3.0))
+
+            sidecar = json.load(open(os.path.join(sub, "sub-1_echo-1_part-mag_MEGRE.json")))
+            assert sidecar["VoxelSize"] == pytest.approx([1.0, 1.0, 3.0])
+            assert sidecar["SliceThickness"] == pytest.approx(3.0)
+            assert sidecar["SliceGap"] == 0.0
+            assert "SlicePhaseOffsets" not in sidecar
+
+    # ---- slice gaps ----------------------------------------------------------------
+
+    def test_slice_gap_samples_non_contiguous_slabs(self):
+        """A gap means 2 mm slabs every 4 mm: fewer slices, and tissue in between is never seen."""
+        n = 48
+        grid = qsm_forward.ReconGrid((6, 6, n), (1.0, 1.0, 1.0), (1.0, 1.0, 2.0), slice_gap=2.0)
+        assert grid.slice_thickness == pytest.approx(2.0)
+        assert grid.slice_gap == pytest.approx(2.0)
+        assert grid.slice_pitch == pytest.approx(4.0)
+        assert grid.n_slices == 12                      # 12 slabs of 2 at a pitch of 4 spans 46 of 48
+        assert grid.voxel_size[2] == pytest.approx(4.0)  # NIfTI carries the pitch, not the thickness
+
+        # slabs start at tissue index 1 so the 46 mm covered is centred in the 48 mm volume
+        expected = self._slab_mean_cosine(n, start=1, thickness=2, pitch=4, n_slices=12)
+        vol = self._cosine_volume(n)
+        assert np.abs(grid.sample_signal(vol.astype(complex)).real[0, 0] - expected).max() < 1e-6
+        assert np.abs(grid.resample_map(self._cosine_nii(vol)).get_fdata()[0, 0] - expected).max() < 1e-6
+
+        # a contiguous 4 mm acquisition over the same FOV averages the skipped tissue back in,
+        # so the two are genuinely different data and the tolerance above is discriminating
+        contiguous = qsm_forward.ReconGrid((6, 6, n), (1.0, 1.0, 1.0), (1.0, 1.0, 4.0))
+        assert contiguous.n_slices == 12
+        assert np.abs(contiguous.sample_signal(vol.astype(complex)).real[0, 0] - expected).max() > 1e-3
+
+    def test_slice_gap_quantises_to_the_tissue_grid_and_reports_what_it_did(self):
+        """A gap that is not a whole number of tissue voxels is rounded, and the result says so."""
+        grid = qsm_forward.ReconGrid((6, 6, 48), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0), slice_gap=1.4)
+        assert grid.slice_gap == pytest.approx(1.0)       # 4.4 mm pitch rounds to 4 tissue voxels
+        assert grid.slice_pitch == pytest.approx(4.0)
+        assert grid.slice_thickness == pytest.approx(3.0)
+
+        # a gap small enough to round away is still kept: asking for a gap must produce one
+        grid = qsm_forward.ReconGrid((6, 6, 48), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0), slice_gap=0.1)
+        assert grid.slice_gap == pytest.approx(1.0)
+        with pytest.raises(ValueError):
+            qsm_forward.ReconGrid((6, 6, 48), (1.0, 1.0, 1.0), (1.0, 1.0, 3.0), slice_gap=-1.0)
+
+    def test_slice_gap_end_to_end(self):
+        chi = qsm_forward.generate_susceptibility_phantom(
+            resolution=[32, 32, 48], background=0, large_cylinder_val=0.005,
+            small_cylinder_radii=[3, 3], small_cylinder_vals=[0.1, 0.2])
+        tissue = qsm_forward.TissueParams(chi=chi)
+        recon = qsm_forward.ReconParams(
+            TEs=np.array([4e-3]), voxel_size=np.array([1.0, 1.0, 2.0]), slice_gap=2.0,
+            random_seed=None, generate_shim_field=False, suffix="T2starw")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            qsm_forward.generate_bids(tissue, recon, temp_dir)
+            sub = os.path.join(temp_dir, "sub-1", "anat")
+            deriv = os.path.join(temp_dir, "derivatives", "qsm-forward", "sub-1", "anat")
+            mag = nib.load(os.path.join(sub, "sub-1_part-mag_T2starw.nii"))
+            chi_map = nib.load(os.path.join(deriv, "sub-1_Chimap.nii"))
+            assert mag.shape == (32, 32, 12) == chi_map.shape
+            assert mag.header.get_zooms()[2] == pytest.approx(4.0)
+            assert chi_map.header.get_zooms()[2] == pytest.approx(4.0)
+
+            sidecar = json.load(open(os.path.join(sub, "sub-1_part-mag_T2starw.json")))
+            assert sidecar["SliceThickness"] == pytest.approx(2.0)
+            assert sidecar["SliceGap"] == pytest.approx(2.0)
+            assert sidecar["VoxelSize"][2] == pytest.approx(4.0)
+
+    # ---- per-slice phase offsets ---------------------------------------------------
+
+    def test_interleaved_offsets_are_two_values_that_alternate(self):
+        offsets = qsm_forward.generate_slice_phase_offsets(7, 'interleaved', amplitude=2.0)
+        assert len(np.unique(offsets)) == 2
+        assert np.abs(np.diff(offsets)).min() == pytest.approx(2.0)   # jump == amplitude
+        assert offsets[0] == pytest.approx(-1.0) and offsets[1] == pytest.approx(1.0)
+
+    def test_random_offsets_are_independent_bounded_and_reproducible(self):
+        a = qsm_forward.generate_slice_phase_offsets(16, 'random', rng=np.random.default_rng(7))
+        b = qsm_forward.generate_slice_phase_offsets(16, 'random', rng=np.random.default_rng(7))
+        c = qsm_forward.generate_slice_phase_offsets(16, 'random', rng=np.random.default_rng(8))
+        assert np.array_equal(a, b)
+        assert not np.array_equal(a, c)
+        assert len(np.unique(a)) == 16
+        assert np.abs(a).max() < np.pi
+
+    def test_offsets_accept_an_explicit_sequence_and_reject_a_wrong_length(self):
+        explicit = [0.1, -0.2, 0.3]
+        assert qsm_forward.generate_slice_phase_offsets(3, explicit) == pytest.approx(explicit)
+        assert qsm_forward.generate_slice_phase_offsets(3, None) is None
+        with pytest.raises(ValueError):
+            qsm_forward.generate_slice_phase_offsets(4, explicit)
+        with pytest.raises(ValueError):
+            qsm_forward.generate_slice_phase_offsets(4, 'spiral')
+
+    def _generate_pair(self, temp_dir, **offset_kwargs):
+        """Same phantom and seed, generated with and without slice phase offsets."""
+        chi = qsm_forward.generate_susceptibility_phantom(
+            resolution=[24, 24, 32], background=0, large_cylinder_val=0.005,
+            small_cylinder_radii=[3, 3], small_cylinder_vals=[0.1, 0.2])
+        tissue = qsm_forward.TissueParams(chi=chi)
+        out = {}
+        for label, extra in (("off", {}), ("on", offset_kwargs)):
+            recon = qsm_forward.ReconParams(
+                TEs=np.array([4e-3, 12e-3, 20e-3]), voxel_size=np.array([1.0, 1.0, 2.0]),
+                random_seed=None, generate_shim_field=False, **extra)
+            root = os.path.join(temp_dir, label)
+            qsm_forward.generate_bids(tissue, recon, root)
+            anat = os.path.join(root, "sub-1", "anat")
+            out[label] = [
+                (nib.load(os.path.join(anat, f"sub-1_echo-{e}_part-mag_MEGRE.nii")).get_fdata()
+                 * np.exp(1j * nib.load(os.path.join(anat, f"sub-1_echo-{e}_part-phase_MEGRE.nii")).get_fdata()))
+                for e in (1, 2, 3)]
+            out[label + "_json"] = json.load(open(os.path.join(anat, "sub-1_echo-1_part-mag_MEGRE.json")))
+        return out
+
+    def test_offsets_are_constant_within_a_slice_and_shared_by_every_echo(self):
+        """The offset belongs to the slice, not the echo - the premise QSM.rs#74 rests on."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = self._generate_pair(temp_dir, slice_phase_offsets='random')
+            recorded = np.array(data["on_json"]["SlicePhaseOffsets"])
+            assert recorded.shape == (16,)
+
+            # a voxel with no signal carries no phase, so only compare where there is some
+            signal = np.abs(data["off"][0])
+            present = signal > 1e-6 * signal.max()
+            assert present.sum() > 0.3 * present.size, "nothing to compare: the mask is too strict"
+
+            for echo, (with_off, without) in enumerate(zip(data["on"], data["off"]), start=1):
+                # magnitude is untouched
+                assert np.abs(np.abs(with_off) - np.abs(without)).max() < 1e-9, f"echo {echo}"
+                # the phase difference is exactly the recorded offset, the same in every voxel
+                delta = np.angle(with_off * np.conj(without))
+                for s in range(16):
+                    here = present[..., s]
+                    assert here.sum() > 0, f"slice {s} has no signal"
+                    wrapped = np.angle(np.exp(1j * (delta[..., s][here] - recorded[s])))
+                    assert np.abs(wrapped).max() < 1e-6, f"echo {echo}, slice {s}"
+
+    def test_offsets_cancel_in_the_echo_to_echo_phase_difference(self):
+        """Why a linear fit across echoes rescues slice-wise unwrapping: the offset is in the intercept."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = self._generate_pair(temp_dir, slice_phase_offsets='interleaved')
+            recorded = np.array(data["on_json"]["SlicePhaseOffsets"])
+            assert len(np.unique(np.round(recorded, 9))) == 2
+
+            signal = np.abs(data["off"][0])
+            present = signal > 1e-6 * signal.max()
+            assert present.sum() > 0.3 * present.size
+
+            for a, b in ((0, 1), (1, 2)):
+                diff_on = data["on"][b] * np.conj(data["on"][a])
+                diff_off = data["off"][b] * np.conj(data["off"][a])
+                assert np.abs(np.angle(diff_on * np.conj(diff_off))[present]).max() < 1e-6
+
+            # and the offsets really were present in the single-echo phase they cancelled out of
+            single = np.angle(data["on"][0] * np.conj(data["off"][0]))[present]
+            assert np.abs(single).max() > 1.0

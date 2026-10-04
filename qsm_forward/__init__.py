@@ -2,7 +2,8 @@
 from .qsm_forward import (
     generate_bids, generate_field, generate_signal, generate_se_signal, add_noise,
     generate_shimmed_field, generate_phase_offset, resize,
-    crop_imagespace, crop_kspace, TissueParams, ReconParams,
+    crop_imagespace, crop_kspace, TissueParams, ReconParams, ReconGrid,
+    generate_slice_phase_offsets,
     generate_susceptibility_phantom, generate_chisep_phantom,
     generate_chisep_maps, generate_r2prime, CHISEP_TISSUE_PARAMS, DR_KERNEL,
     get_version,
@@ -18,7 +19,8 @@ from .qsm_forward import (
 __all__ = [
     'generate_bids', 'generate_field', 'generate_signal', 'generate_se_signal', 'add_noise',
     'generate_shimmed_field', 'generate_phase_offset', 'resize',
-    'crop_imagespace', 'crop_kspace', 'TissueParams', 'ReconParams',
+    'crop_imagespace', 'crop_kspace', 'TissueParams', 'ReconParams', 'ReconGrid',
+    'generate_slice_phase_offsets',
     'generate_susceptibility_phantom', 'generate_chisep_phantom',
     'generate_chisep_maps', 'generate_r2prime', 'CHISEP_TISSUE_PARAMS', 'DR_KERNEL',
     'get_version',

@@ -240,6 +240,44 @@ In this [example](qsm_forward/examples/simulated_sources_oblique.py), we simulat
 
 On the left is the phase image with the two sources with an axial B0 direction. On the right is a phase image with the two sources with a B0 direction rotated 30 degrees about the x axis.
 
+## Example simulating a 2D multi-slice acquisition
+
+3D acquisitions sample a contiguous volume. A 2D multi-slice acquisition excites one slice at a
+time, which gives it two properties that break tools written for 3D data, and both can be
+simulated here.
+
+Each slice is excited separately and so carries its own constant receive phase offset.
+`slice_phase_offsets` applies them to the complex signal: `'random'` draws an independent offset
+per slice, and `'interleaved'` alternates between two values, mimicking an acquisition collected
+in two passes. The offsets are a property of the slice rather than the echo, so they are shared by
+every echo of a multi-echo train — which is why they land in the intercept of `phi(TE) = phi0 +
+gamma*dB*TE` and cancel in a linear fit across echoes. They are recorded in the sidecar as
+`SlicePhaseOffsets`.
+
+Slices are also often sampled at a pitch larger than their thickness. `slice_gap` leaves a gap
+between the excited slabs, so the sampled volume is no longer contiguous. This case is worth
+generating deliberately: the FFT-based dipole kernel assumes a contiguous grid, so on gapped data
+it is invalid and any susceptibility map derived from it is wrong rather than approximate. The
+sidecar records `SliceThickness` and `SliceGap` separately, since NIfTI can only carry the pitch.
+
+```python
+recon_params = qsm_forward.ReconParams(
+    voxel_size=np.array([1.0, 1.0, 3.0]),   # 3 mm slices, 1 mm in plane
+    slice_phase_offsets='interleaved',      # or 'random', or an explicit list of radians
+    slice_gap=1.0,                          # 3 mm slabs at a 4 mm pitch (omit for contiguous)
+)
+```
+
+```
+qsm-forward head ~/data bids --voxel-size 1 1 3 --slice-phase-offsets interleaved --slice-gap 1
+```
+
+Note that the field of view is fixed by the tissue model and the matrix size is a whole number, so
+the achievable voxel size is `FOV / matrix` and the request is quantised to the nearest matrix.
+Asking for 3 mm slices across a 64 mm field of view gives 21 slices of 3.048 mm. The sidecar and
+the NIfTI affine report what was actually sampled, not what was asked for, so the signal and the
+ground-truth maps always describe the same grid.
+
 ## Example simulating chi-separation (paramagnetic/diamagnetic) sources
 
 The optional chi-separation model splits total susceptibility into paramagnetic (χ⁺, e.g. iron) and diamagnetic (χ⁻, e.g. myelin/calcium) components and derives the associated relaxation maps. When you don't supply explicit χ⁺/χ⁻ maps, they are derived from the phantom's tissue segmentation using per-tissue reference values (see the attribution note above). Passing `chisep_signal=True` additionally switches the MEGRE magnitude to the chi-sep-aware signal model (R2 + Dr·|χ|) instead of R2*.
