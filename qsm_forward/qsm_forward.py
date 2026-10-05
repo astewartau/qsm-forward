@@ -478,7 +478,22 @@ class ReconParams:
     generate_shim_field : bool
         Boolean to control shim field generation.
     voxel_size : np.array
-        Voxel size (in mm).
+        Voxel size (in mm). Along the slice axis this is the slice thickness; the
+        slice-to-slice pitch is larger when slice_gap is set.
+    slice_gap : float
+        Gap (in mm) between the excited slabs of consecutive slices, for simulating a 2D
+        multi-slice acquisition. Default 0 (contiguous slices). A non-zero gap makes the
+        sampled volume non-contiguous, which invalidates the FFT-based dipole kernel - the
+        point of generating it is to check that downstream tools refuse such data.
+    slice_phase_offsets : None or str or array-like
+        Per-slice receive phase offsets, the defining artifact of 2D multi-slice: None for
+        none, 'random' for independent offsets, 'interleaved' for a two-value alternating
+        pattern, or an explicit sequence of offsets in radians. The offsets are
+        echo-independent, so they land in the intercept of a phase-vs-TE fit.
+    slice_phase_offset_amplitude : float
+        Amplitude (in radians) of the generated slice phase offsets. Default pi.
+    slice_axis : int
+        Axis slices are stacked along. Default 2.
     peak_snr : float
         Peak signal-to-noise ratio.
     random_seed : int
@@ -509,6 +524,10 @@ class ReconParams:
             generate_phase_offset=True,
             generate_shim_field=True,
             voxel_size=np.array([1.0, 1.0, 1.0]),
+            slice_gap=0.0,
+            slice_phase_offsets=None,
+            slice_phase_offset_amplitude=np.pi,
+            slice_axis=2,
             peak_snr=np.inf,
             random_seed=None,
             suffix=None,
@@ -529,6 +548,10 @@ class ReconParams:
         self.generate_phase_offset = generate_phase_offset
         self.generate_shim_field = generate_shim_field
         self.voxel_size = voxel_size
+        self.slice_gap = slice_gap
+        self.slice_phase_offsets = slice_phase_offsets
+        self.slice_phase_offset_amplitude = slice_phase_offset_amplitude
+        self.slice_axis = slice_axis
         self.peak_snr = peak_snr
         self.random_seed = random_seed
         self.save_phase = save_phase
@@ -648,15 +671,45 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     affine = adjust_affine_for_B0_direction(tissue_params.nii_affine.copy(), recon_params.B0_dir)
     tissue_params.set_affine(affine)
 
+    # the grid the acquisition actually samples, which the signal and every ground-truth
+    # map are then put on; see ReconGrid for why this is not just voxel_size
+    grid = ReconGrid(
+        tissue_shape=tissue_params.nii_header.get_data_shape(),
+        tissue_voxel_size=tissue_params.voxel_size,
+        voxel_size=recon_params.voxel_size,
+        slice_gap=getattr(recon_params, 'slice_gap', 0.0),
+        slice_axis=getattr(recon_params, 'slice_axis', 2),
+    )
+    if not np.allclose(grid.voxel_size, grid.requested_voxel_size, atol=1e-6):
+        print(f"Requested voxel size {np.array2string(grid.requested_voxel_size, precision=4)} mm is not "
+              f"achievable on a {tuple(int(n) for n in grid.tissue_shape)} field of view; "
+              f"acquiring {grid.shape} at {np.array2string(grid.voxel_size, precision=4)} mm instead")
+    if grid.slice_gap > 0:
+        print(f"2D multi-slice: {grid.n_slices} slices of {grid.slice_thickness:.4f} mm at a "
+              f"{grid.slice_pitch:.4f} mm pitch ({grid.slice_gap:.4f} mm gap)")
+
+    # per-slice receive phase offsets, shared by every echo (see generate_slice_phase_offsets)
+    slice_phase_offsets = generate_slice_phase_offsets(
+        grid.n_slices,
+        getattr(recon_params, 'slice_phase_offsets', None),
+        amplitude=getattr(recon_params, 'slice_phase_offset_amplitude', np.pi),
+        # a stream of its own, so adding noise does not change the offsets or vice versa
+        rng=np.random.default_rng(None if recon_params.random_seed is None else [recon_params.random_seed, 1]),
+    )
+    if slice_phase_offsets is not None:
+        slice_phase_ramp = np.exp(1j * grid.broadcast_along_slices(slice_phase_offsets))
+        print(f"Applying per-slice phase offsets to {grid.n_slices} slices "
+              f"(range {slice_phase_offsets.min():.3f} to {slice_phase_offsets.max():.3f} rad)")
+
     # image-space resizing
     print("Image-space resizing of chi...")
-    chi_downsampled_nii = resize(tissue_params.chi, recon_params.voxel_size)
+    chi_downsampled_nii = grid.resample_map(tissue_params.chi)
     if save_chi: nib.save(chi_downsampled_nii, filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap.nii"))
     print("Image-space cropping of mask...")
     if save_mask:
-        nib.save(resize(tissue_params.mask, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
+        nib.save(grid.resample_map(tissue_params.mask, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_mask.nii"))
     print("Image-space cropping of segmentation...")
-    if save_segmentation: nib.save(resize(tissue_params.seg, recon_params.voxel_size, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
+    if save_segmentation: nib.save(grid.resample_map(tissue_params.seg, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
 
     # chi-separation derivatives
     if save_chi_pos or save_chi_neg or save_r2prime:
@@ -665,11 +718,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         chi_neg_nii = tissue_params.chi_neg
         if save_chi_pos:
             print("Image-space resizing of chi+...")
-            nib.save(resize(chi_pos_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-pos.nii"))
+            nib.save(grid.resample_map(chi_pos_nii), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-pos.nii"))
         if save_chi_neg:
             print("Image-space resizing of chi-...")
             chi_neg_abs_nii = nib.Nifti1Image(dataobj=np.abs(chi_neg_nii.get_fdata()), affine=chi_neg_nii.affine, header=chi_neg_nii.header)
-            nib.save(resize(chi_neg_abs_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-neg.nii"))
+            nib.save(grid.resample_map(chi_neg_abs_nii), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-neg.nii"))
         if save_r2prime:
             print("Computing R2' from chi+ and chi-...")
             # Provided spatially-varying Dr maps (e.g. anisotropic split relaxivity) take precedence
@@ -700,28 +753,28 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                     print("  Multi-compartment WM model: WM R2' = Dr+*|chi+| + hollow-cylinder pool interference")
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
-            nib.save(resize(r2prime_nii, recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
+            nib.save(grid.resample_map(r2prime_nii), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
 
     # calculate field
     print("Computing field model...")
     field = generate_field(tissue_params.chi.get_fdata(), tissue_params.mask.get_fdata(),voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
     if save_field:
-        nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
+        nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap.nii"))
         local_field = generate_field(tissue_params.chi.get_fdata() * tissue_params.mask.get_fdata(), tissue_params.mask.get_fdata(), voxel_size=tissue_params.voxel_size, B0_dir=recon_params.B0_dir)
-        nib.save(resize(nib.Nifti1Image(dataobj=np.array(local_field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap-local.nii"))
+        nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(local_field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_fieldmap-local.nii"))
 
     # simulate shim field
     if recon_params.generate_shim_field:
         print("Computing shim fields...")
         _, field, _ = generate_shimmed_field(field, tissue_params.mask.get_fdata(), order=2)
-        if save_shimmed_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed_fieldmap.nii"))
+        if save_shimmed_field: nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed_fieldmap.nii"))
 
     # phase offset
     phase_offset = recon_params.phase_offset
     if recon_params.generate_phase_offset:
         print("Computing phase offset...")
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
-        if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
+        if save_shimmed_offset_field: nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
     # The multi-compartment GRE model needs the chi-sep maps (chi+/chi-, R2, Dr), so it implies chisep_signal.
     if chisep_multicompartment:
@@ -751,9 +804,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                 B0=recon_params.B0
             )
             if save_t2:
-                nib.save(resize(nib.Nifti1Image(dataobj=T2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_T2map.nii"))
+                nib.save(grid.resample_map(nib.Nifti1Image(dataobj=T2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_T2map.nii"))
         if save_r2:
-            nib.save(resize(nib.Nifti1Image(dataobj=R2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2map.nii"))
+            nib.save(grid.resample_map(nib.Nifti1Image(dataobj=R2_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2map.nii"))
 
     if chisep_signal:
         print("Setting up chi-sep-aware GRE signal model...")
@@ -812,9 +865,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             dr_pos_save = dr_pos_data if np.ndim(dr_pos_data) else dr_pos_data * mask_data
             dr_neg_save = dr_neg_data if np.ndim(dr_neg_data) else dr_neg_data * mask_data
             if save_dr_pos:
-                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_pos_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
+                nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.asarray(dr_pos_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-pos.nii"))
             if save_dr_neg:
-                nib.save(resize(nib.Nifti1Image(dataobj=np.asarray(dr_neg_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
+                nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.asarray(dr_neg_save, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Dr-neg.nii"))
 
     # Longitudinal relaxation for the signal. At 3T the reference swaps in the R1_3T map
     # (Map_creation_3T.m per-region division factors, loaded by GRESimulation.m when B0==3);
@@ -858,9 +911,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     
         # k-space cropping of sigHR
         print(f"k-space cropping of MR signal for echo {i+1}...")
-        resolution = np.array(np.round((np.array(tissue_params.voxel_size) / recon_params.voxel_size) * np.array(tissue_params.nii_header.get_data_shape())), dtype=int)
-        sigHR_cropped = crop_kspace(sigHR, resolution)
+        sigHR_cropped = grid.sample_signal(sigHR)
         del sigHR
+
+        # per-slice phase offsets: a property of the slice, not the echo, so the same
+        # offsets go on every echo and a phase-vs-TE fit sees them only in the intercept
+        if slice_phase_offsets is not None:
+            sigHR_cropped = sigHR_cropped * slice_phase_ramp
 
         # noise
         if recon_params.random_seed is not None:
@@ -899,9 +956,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             'B0_dir': recon_params.B0_dir.tolist(),
             'PhaseOffset': recon_params.generate_phase_offset or phase_offset != 0,
             'ShimmField': recon_params.generate_shim_field,
-            'VoxelSize': recon_params.voxel_size.tolist(),
+            'VoxelSize': grid.voxel_size.tolist(),
+            'SliceThickness': grid.slice_thickness,
+            'SliceGap': grid.slice_gap,
             'PeakSNR': recon_params.peak_snr if recon_params.peak_snr != np.inf else "inf"
         }
+        if slice_phase_offsets is not None:
+            json_dict['SlicePhaseOffsets'] = slice_phase_offsets.tolist()
 
         json_dict_phs = json_dict.copy()
         json_dict_phs['ImageType'] = ['P', 'PHASE']
@@ -957,8 +1018,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
 
             # k-space cropping of sigHR
             print(f"k-space cropping of SE signal for echo {i+1}...")
-            resolution = np.array(np.round((np.array(tissue_params.voxel_size) / recon_params.voxel_size) * np.array(tissue_params.nii_header.get_data_shape())), dtype=int)
-            sigHR_cropped = crop_kspace(sigHR, resolution)
+            sigHR_cropped = grid.sample_signal(sigHR)
             del sigHR
 
             # noise (complex noise -> Rician magnitude, matching the GRE path)
@@ -991,7 +1051,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                 'ConversionSoftware': 'qsm-forward',
                 'RepetitionTime': se_TR,
                 'B0_dir': recon_params.B0_dir.tolist(),
-                'VoxelSize': recon_params.voxel_size.tolist(),
+                'VoxelSize': grid.voxel_size.tolist(),
+                'SliceThickness': grid.slice_thickness,
+                'SliceGap': grid.slice_gap,
                 'PeakSNR': recon_params.peak_snr if recon_params.peak_snr != np.inf else "inf",
                 'PulseSequenceType': 'Spin Echo',
                 'ImageType': ['M', 'MAGNITUDE'],
@@ -2596,6 +2658,189 @@ def crop_kspace(volume, dims, scaling=True, gibbs_correction=True):
         working_volume *= np.prod(dims) / np.prod(volume.shape)
     
     return working_volume
+
+
+def generate_slice_phase_offsets(n_slices, mode, amplitude=np.pi, rng=None):
+    """
+    Generate the per-slice receive phase offsets of a 2D multi-slice acquisition.
+
+    Each slice of a 2D multi-slice acquisition is excited separately and carries its own
+    constant phase offset. The offset is a property of the slice, not of the echo, so the
+    same array is applied to every echo of a multi-echo train.
+
+    Parameters
+    ----------
+    n_slices : int
+        Number of acquired slices.
+    mode : None or str or array-like
+        ``None`` (or ``False``) for no offsets; ``'random'`` for independent offsets drawn
+        uniformly from ``[-amplitude, amplitude)``; ``'interleaved'`` for a two-value pattern
+        alternating between ``-amplitude/2`` and ``+amplitude/2``, which mimics the
+        slice-to-slice jumps of an interleaved acquisition acquired in two passes; or an
+        explicit sequence of ``n_slices`` offsets in radians.
+    amplitude : float, optional
+        Offset amplitude in radians. Default is pi, which makes the neighbouring-slice jump
+        of ``'interleaved'`` equal to pi.
+    rng : numpy.random.Generator, optional
+        Generator used by ``'random'``. A default generator is created if omitted.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of ``n_slices`` phase offsets in radians, or None if ``mode`` is falsy.
+
+    """
+    if mode is None or mode is False:
+        return None
+    if isinstance(mode, str):
+        if rng is None:
+            rng = np.random.default_rng()
+        if mode == 'random':
+            return rng.uniform(-amplitude, amplitude, n_slices)
+        if mode == 'interleaved':
+            # two acquisition passes (even slices, then odd slices), one offset each
+            return np.where(np.arange(n_slices) % 2 == 0, -amplitude / 2, amplitude / 2)
+        raise ValueError(f"Unknown slice_phase_offsets mode '{mode}'; expected 'random', 'interleaved', None, or an explicit sequence")
+    offsets = np.asarray(mode, dtype=float).reshape(-1)
+    if offsets.size != n_slices:
+        raise ValueError(f"slice_phase_offsets has {offsets.size} entries but the acquisition has {n_slices} slices")
+    return offsets
+
+
+class ReconGrid:
+    """
+    The grid an acquisition actually samples, derived from the tissue model and ReconParams.
+
+    Two things stop the acquired grid from being "the tissue grid divided by voxel_size".
+
+    The field of view is fixed by the tissue model and the matrix size is a whole number, so
+    the achievable voxel size is ``FOV / matrix`` and the requested size is quantised to the
+    nearest matrix. This matters: the k-space-cropped signal lands on the ``FOV / matrix``
+    grid whatever the affine claims, so labelling it with the requested size leaves the
+    signal and the interpolated ground-truth maps on grids that disagree. Asking for 3 mm
+    slices across a 64 mm FOV gives 21 slices of 3.048 mm, and calling them 3 mm puts the
+    signal and the ground truth 0.7 mm - about a quarter of a slice - apart at the edge.
+
+    A 2D multi-slice acquisition with a slice gap excites slabs of ``slice_thickness`` at a
+    pitch of ``slice_thickness + slice_gap``, so the sampled volume is not contiguous. That
+    cannot be produced by k-space cropping at all, and is instead sampled by averaging the
+    tissue-resolution slices each slab covers.
+
+    Parameters
+    ----------
+    tissue_shape : sequence of int
+        Shape of the tissue-resolution model.
+    tissue_voxel_size : sequence of float
+        Voxel size (mm) of the tissue-resolution model.
+    voxel_size : sequence of float
+        Requested acquisition voxel size (mm). Along the slice axis this is the slice
+        thickness, not the slice pitch.
+    slice_gap : float, optional
+        Gap (mm) between the excited slabs of consecutive slices. Default 0 (contiguous).
+    slice_axis : int, optional
+        Axis slices are stacked along. Default 2.
+
+    """
+
+    def __init__(self, tissue_shape, tissue_voxel_size, voxel_size, slice_gap=0.0, slice_axis=2):
+        self.tissue_shape = np.asarray(tissue_shape, dtype=int)[:3]
+        self.tissue_voxel_size = np.asarray(tissue_voxel_size, dtype=float)[:3]
+        self.requested_voxel_size = np.asarray(voxel_size, dtype=float)[:3]
+        self.slice_axis = int(slice_axis)
+        slice_gap = float(slice_gap)
+        if slice_gap < 0:
+            raise ValueError(f"slice_gap must be >= 0 (got {slice_gap})")
+
+        # Matrix size, by the same expression generate_bids has always used, so a run
+        # without a slice gap keeps exactly the shape it had before.
+        matrix = np.array(np.round(
+            (self.tissue_voxel_size / self.requested_voxel_size) * self.tissue_shape
+        ), dtype=int)
+        self.matrix = np.maximum(matrix, 1)
+        achieved = (self.tissue_shape * self.tissue_voxel_size) / self.matrix
+
+        if slice_gap == 0:
+            self._slab = None
+            self.shape = tuple(int(n) for n in self.matrix)
+            self.voxel_size = achieved
+            self.slice_thickness = float(achieved[self.slice_axis])
+            self.slice_gap = 0.0
+            return
+
+        # Gapped: slabs are selected on the tissue grid, so the thickness and pitch are
+        # quantised to whole tissue voxels and the achieved values are reported back.
+        ax = self.slice_axis
+        dz = float(self.tissue_voxel_size[ax])
+        n_hi = int(self.tissue_shape[ax])
+        thickness_vox = max(int(round(self.requested_voxel_size[ax] / dz)), 1)
+        pitch_vox = max(int(round((self.requested_voxel_size[ax] + slice_gap) / dz)), thickness_vox + 1)
+        if thickness_vox > n_hi:
+            raise ValueError(f"slice thickness {self.requested_voxel_size[ax]} mm exceeds the {n_hi * dz} mm field of view")
+        n_slices = (n_hi - thickness_vox) // pitch_vox + 1
+        coverage = (n_slices - 1) * pitch_vox + thickness_vox
+        start = (n_hi - coverage) // 2
+        self._slab = (start, thickness_vox, pitch_vox, n_slices)
+
+        shape = list(int(n) for n in self.matrix)
+        shape[ax] = int(n_slices)
+        self.shape = tuple(shape)
+        self.voxel_size = achieved.copy()
+        self.voxel_size[ax] = pitch_vox * dz      # NIfTI encodes the pitch, not the thickness
+        self.slice_thickness = thickness_vox * dz
+        self.slice_gap = (pitch_vox - thickness_vox) * dz
+
+    @property
+    def n_slices(self):
+        return self.shape[self.slice_axis]
+
+    @property
+    def slice_pitch(self):
+        return float(self.voxel_size[self.slice_axis])
+
+    def _reduce_slabs(self, data, nearest=False):
+        """Collapse the tissue-resolution slice axis onto the acquired slabs."""
+        start, thickness, pitch, n_slices = self._slab
+        ax = self.slice_axis
+        out = []
+        for s in range(n_slices):
+            lo = start + s * pitch
+            idx = [slice(None)] * data.ndim
+            if nearest:
+                idx[ax] = lo + (thickness - 1) // 2
+                out.append(data[tuple(idx)])
+            else:
+                idx[ax] = slice(lo, lo + thickness)
+                out.append(data[tuple(idx)].mean(axis=ax))
+        return np.stack(out, axis=ax)
+
+    def resample_map(self, nii, interpolation='continuous'):
+        """Resample a tissue-resolution map onto the acquired grid."""
+        if self._slab is None:
+            return resize(nii, self.voxel_size, interpolation)
+        ax = self.slice_axis
+        # in-plane first (the slice axis is left at tissue resolution), then slab selection
+        inplane = np.array(self.voxel_size, dtype=float)
+        inplane[ax] = self.tissue_voxel_size[ax]
+        inplane_nii = resize(nii, inplane, interpolation)
+        data = self._reduce_slabs(inplane_nii.get_fdata(), nearest=(interpolation == 'nearest'))
+        affine = inplane_nii.affine.copy()
+        affine[:, ax] *= self.slice_pitch / self.tissue_voxel_size[ax]
+        return nib.Nifti1Image(data.astype(nii.get_data_dtype()), affine)
+
+    def sample_signal(self, signal):
+        """Sample a tissue-resolution complex signal onto the acquired grid."""
+        if self._slab is None:
+            return crop_kspace(signal, self.shape)
+        ax = self.slice_axis
+        inplane_shape = list(self.shape)
+        inplane_shape[ax] = int(self.tissue_shape[ax])
+        return self._reduce_slabs(crop_kspace(signal, tuple(inplane_shape)))
+
+    def broadcast_along_slices(self, values):
+        """Reshape a per-slice array so it broadcasts against a volume on this grid."""
+        shape = [1, 1, 1]
+        shape[self.slice_axis] = -1
+        return np.asarray(values).reshape(shape)
 
 
 def _generate_3d_dipole_kernel(data_shape, voxel_size, B0_dir):

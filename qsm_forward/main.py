@@ -29,7 +29,19 @@ def add_common_args(p):
     p.add_argument('--suffix', default='MEGRE')
     p.add_argument('--generate-phase-offset', nargs='?', type=argparse_bool, const=True, default=True)
     p.add_argument('--generate-shim-field', nargs='?', type=argparse_bool, const=True, default=True)
-    p.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3)
+    p.add_argument('--voxel-size', default=[1., 1., 1.], type=float, nargs=3,
+                   help='Acquisition voxel size (mm); along the slice axis this is the slice thickness')
+    p.add_argument('--slice-gap', default=0.0, type=float,
+                   help='Gap (mm) between the excited slabs of consecutive slices, for 2D multi-slice. '
+                        'A gap makes the sampled volume non-contiguous, which invalidates the FFT-based '
+                        'dipole kernel (default: 0, contiguous)')
+    p.add_argument('--slice-phase-offsets', default=None, choices=['random', 'interleaved'],
+                   help='Add a per-slice receive phase offset, the defining artifact of 2D multi-slice: '
+                        'independent offsets per slice, or a two-value pattern alternating between '
+                        'adjacent slices as in an interleaved acquisition')
+    p.add_argument('--slice-phase-offset-amplitude', default=np.pi, type=float,
+                   help='Amplitude (radians) of the generated slice phase offsets (default: pi)')
+    p.add_argument('--slice-axis', default=2, type=int, help='Axis slices are stacked along (default: 2)')
     p.add_argument('--peak-snr', default=np.inf, type=float)
     p.add_argument('--random-seed', default=42, type=int)
     p.add_argument('--save-phase', nargs='?', type=argparse_bool, const=True, default=True)
@@ -51,7 +63,10 @@ def make_recon_params(args):
         TR=args.TR, TEs=np.array(args.TEs), flip_angle=args.flip_angle,
         B0=args.B0, B0_dir=np.array(args.B0_dir), phase_offset=0,
         generate_phase_offset=args.generate_phase_offset, generate_shim_field=args.generate_shim_field,
-        voxel_size=np.array(args.voxel_size), peak_snr=args.peak_snr, random_seed=args.random_seed,
+        voxel_size=np.array(args.voxel_size), slice_gap=args.slice_gap,
+        slice_phase_offsets=args.slice_phase_offsets,
+        slice_phase_offset_amplitude=args.slice_phase_offset_amplitude, slice_axis=args.slice_axis,
+        peak_snr=args.peak_snr, random_seed=args.random_seed,
         save_phase=args.save_phase, suffix=args.suffix, se_TR=args.se_TR, se_TEs=np.array(args.se_TEs),
     )
 
