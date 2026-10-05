@@ -16,6 +16,10 @@ Each session is a separate run over the same tissue model:
 
 The results are saved in the "bids" directory.
 
+This is the recipe QSM.rs's `tests/multislice_2d.rs` expects, including
+`save_shimmed_field=True` — see the comment on the generate_bids call for why that
+flag is not optional.
+
 Author: Ashley Stewart (a.stewart.au@gmail.com)
 """
 
@@ -49,4 +53,13 @@ if __name__ == "__main__":
             random_seed=42,
             **extra
         )
-        qsm_forward.generate_bids(tissue_params, recon_params, "bids", save_field=True)
+        # save_shimmed_field matters and is easy to miss. generate_bids applies a second-order
+        # shim *after* writing `fieldmap`, and the signal is generated from the shimmed field, so
+        # `fieldmap` is not what the phase encodes. Anything validating an unwrapper or a B0 fit
+        # against this phantom has to compare against `desc-shimmed_fieldmap`, which is what this
+        # flag writes. Comparing against `fieldmap` instead silently costs ~0.02 of correlation
+        # and, with the shim large enough, far more than that.
+        qsm_forward.generate_bids(
+            tissue_params, recon_params, "bids",
+            save_field=True, save_shimmed_field=True,
+        )
