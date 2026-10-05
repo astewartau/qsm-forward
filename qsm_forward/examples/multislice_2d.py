@@ -18,7 +18,19 @@ The results are saved in the "bids" directory.
 
 This is the recipe QSM.rs's `tests/multislice_2d.rs` expects, including
 `save_shimmed_field=True` — see the comment on the generate_bids call for why that
-flag is not optional.
+flag is not optional. It writes `sub-multislice`, which is the subject that test
+reads; changing it here breaks the test silently, because a session it cannot find
+is a session it skips.
+
+Running it needs qsm_forward importable, which is not the same as being in this
+repository:
+
+    pip install -e .                        # from the repository root
+    PYTHONPATH=/path/to/qsm-forward python qsm_forward/examples/multislice_2d.py
+
+Checking `import qsm_forward` from inside the repository directory proves nothing,
+since the current directory supplies the package there and will not once you cd
+elsewhere to generate into an output directory.
 
 Author: Ashley Stewart (a.stewart.au@gmail.com)
 """
