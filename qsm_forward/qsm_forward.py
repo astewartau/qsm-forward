@@ -931,7 +931,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if chi_echoes is not None:
             TE_i = recon_params.TEs[i]
             bulk = 2 * np.pi * field * recon_params.B0 * 42.58 * TE_i + phase_offset
-            residual = np.angle(sigHR * np.exp(-1j * bulk))
+            # relative to sign(M0): the head model has a few M0 <= 0 voxels, whose sign flip is
+            # not sub-voxel phase
+            residual = np.angle(sigHR * np.exp(-1j * bulk) * np.sign(tissue_params.M0.get_fdata()))
             if prev_residual is not None:
                 residual = residual + np.round((prev_residual - residual) / (2 * np.pi)) * 2 * np.pi
             prev_residual = residual
