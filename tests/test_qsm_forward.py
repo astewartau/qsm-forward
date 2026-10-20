@@ -1312,3 +1312,26 @@ class TestDecomposeSignal:
             qsm_forward.generate_signal(np.zeros(2), R2=np.ones(2), dr_pos=1, dr_neg=1,
                                         chi_pos=np.zeros(2), chi_neg=np.zeros(2),
                                         multicompartment=True, decompose=True)
+
+
+class TestChisepPresets:
+    """Named chi-sep phantom configurations."""
+
+    def test_presets_are_valid(self):
+        from qsm_forward import chisep
+        for name, cfg in chisep.PRESETS.items():
+            assert cfg.signal_model in chisep.SIGNAL_MODELS, name
+            assert len(cfg.tes_ms) >= 3, name
+
+    def test_preset_overrides(self):
+        from qsm_forward import chisep
+        cfg = chisep.preset("decompose-3t", noiseless=False)
+        assert cfg.signal_model == "decompose" and cfg.b0 == 3.0 and not cfg.noiseless
+        assert chisep.PRESETS["decompose-3t"].noiseless  # the registry entry is untouched
+
+    def test_unknown_preset_and_model(self):
+        from qsm_forward import chisep
+        with pytest.raises(KeyError):
+            chisep.preset("nope")
+        with pytest.raises(ValueError):
+            chisep.ChisepConfig(signal_model="nope")
