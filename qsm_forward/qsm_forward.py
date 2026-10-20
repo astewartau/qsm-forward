@@ -937,6 +937,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             prefactor = tissue_params.M0.get_fdata() * (1 - np.exp(-recon_params.TR * R1_data)) * np.sin(fa) \
                 / (1 - np.cos(fa) * np.exp(-recon_params.TR * R1_data))
             residual = np.angle(sigHR * np.exp(-1j * bulk) * np.sign(prefactor))
+            residual[sigHR == 0] = 0.0  # no signal: no phase (np.angle(-0.0) is pi)
             if prev_residual is not None:
                 residual = residual + np.round((prev_residual - residual) / (2 * np.pi)) * 2 * np.pi
             prev_residual = residual
