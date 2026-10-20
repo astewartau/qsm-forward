@@ -282,12 +282,16 @@ def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
                 chi_i=-0.12, chi_a=-0.10, rng=None, axon_kw=None):
     """Build geometry + basis maps.
 
+    Sheath tensor in the Wharton & Bowtell (2012) parameterisation,
+    chi = chi_i*I + chi_a*diag(1, -1/2, -1/2) in (r, phi, z), so tr/3 = chi_i (the
+    volume-averaged mean susceptibility of the sheath is chi_i).
+
     ``zetas``: increasing list of sphere volume fractions; the sphere sets are nested
     (level k uses the first N_k spheres), and basis maps are stored per *increment*
     so that the cumulative field at level k is the sum over increments <= k."""
     rng = np.random.default_rng(rng)
     pk = pack_axons(L, fvf, g=g, rng=rng, **(axon_kw or {}))
-    cxx, cxy, czz, lab = raster_axons(pk, n2d, chi_i, chi_a)
+    cxx, cxy, czz, lab = raster_axons(pk, n2d, chi_i - chi_a / 2, 1.5 * chi_a)
     M1, M2 = myelin_basis(cxx, cxy, czz, L)
     del cxx, cxy, czz
     s2d = Sampler2D([M1, M2], L)
@@ -303,8 +307,7 @@ def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
             maps += sphere_basis(S, L)
             prev = k
         s3d = Sampler3D(maps, L)
-    # tr/3 of the sheath tensor: (chi_rr + chi_phiphi + chi_zz)/3
-    chi_mean = chi_i + chi_a / 3
+    chi_mean = chi_i   # tr/3 of the sheath tensor
     return Voxel(L, pk, lab, s2d, s3d, zetas, chi_mean)
 
 
