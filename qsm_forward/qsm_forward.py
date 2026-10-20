@@ -931,9 +931,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if chi_echoes is not None:
             TE_i = recon_params.TEs[i]
             bulk = 2 * np.pi * field * recon_params.B0 * 42.58 * TE_i + phase_offset
-            # relative to sign(M0): the head model has a few M0 <= 0 voxels, whose sign flip is
-            # not sub-voxel phase
-            residual = np.angle(sigHR * np.exp(-1j * bulk) * np.sign(tissue_params.M0.get_fdata()))
+            # relative to the sign of the real SPGR prefactor (M0 and T1 weighting): a few head-model
+            # voxels have M0 <= 0 or R1 < 0, and that sign flip is not sub-voxel phase
+            fa = np.deg2rad(recon_params.flip_angle)
+            prefactor = tissue_params.M0.get_fdata() * (1 - np.exp(-recon_params.TR * R1_data)) * np.sin(fa) \
+                / (1 - np.cos(fa) * np.exp(-recon_params.TR * R1_data))
+            residual = np.angle(sigHR * np.exp(-1j * bulk) * np.sign(prefactor))
             if prev_residual is not None:
                 residual = residual + np.round((prev_residual - residual) / (2 * np.pi)) * 2 * np.pi
             prev_residual = residual
