@@ -582,7 +582,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, chisep_decompose=False, chisep_decompose_chi_c=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, chisep_decompose=False, chisep_decompose_chi_c=None, save_chi_echoes=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -891,6 +891,15 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             if m.any():
                 R1_data[m] = R1_data[m] / factor
 
+    # Echo-dependent susceptibility χ(TE) (DECOMPOSE-QSM's input, Chen et al. 2021 Eq. 4): the
+    # voxel's phase at each echo expressed as y(TE) = |S|·exp(-i·(2/3)·χ(TE)·γ·B0·TE) on top of the
+    # macroscopic field. The sub-voxel signal model's residual phase (beyond the bulk field) is
+    # unwrapped along echoes and converted with DECOMPOSE's (2/3)γB0 factor; a mono-exponential
+    # model has no residual, so χ(TE) = χ for every echo.
+    chi_echoes = [] if save_chi_echoes else None
+    prev_residual = None
+    w_chi = 2 * np.pi * (2.0 / 3.0) * 42.58 * recon_params.B0  # rad/s per ppm
+
     # signal model
     multiecho = len(recon_params.TEs) > 1
     for i in range(len(recon_params.TEs)):
@@ -919,6 +928,16 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             decompose=chisep_decompose,
             decompose_chi_c=DECOMPOSE_CHI_C if chisep_decompose_chi_c is None else chisep_decompose_chi_c,
         )
+        if chi_echoes is not None:
+            TE_i = recon_params.TEs[i]
+            bulk = 2 * np.pi * field * recon_params.B0 * 42.58 * TE_i + phase_offset
+            residual = np.angle(sigHR * np.exp(-1j * bulk))
+            if prev_residual is not None:
+                residual = residual + np.round((prev_residual - residual) / (2 * np.pi)) * 2 * np.pi
+            prev_residual = residual
+            chi_echoes.append(grid.resample_map(nib.Nifti1Image(
+                dataobj=(tissue_params.chi.get_fdata() + residual / (w_chi * TE_i)).astype(np.float32),
+                affine=tissue_params.nii_affine, header=tissue_params.nii_header)))
     
         # k-space cropping of sigHR
         print(f"k-space cropping of MR signal for echo {i+1}...")
@@ -985,6 +1004,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if recon_params.save_phase:
             with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
+
+    if chi_echoes:
+        stack = np.stack([np.asarray(im.get_fdata(), np.float32) for im in chi_echoes], axis=-1)
+        nib.save(nib.Nifti1Image(stack, chi_echoes[0].affine, chi_echoes[0].header),
+                 filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_Chimap-echoes.nii"))
 
     # spin-echo signal (magnitude only; decays with R2, not R2*, and carries no susceptibility phase)
     if save_se:

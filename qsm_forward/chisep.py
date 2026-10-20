@@ -85,6 +85,8 @@ _RIDANI_3T = dict(b0=3.0, tes_ms=(3, 7, 11, 15, 19, 23), **_RIDANI)
 _DECOMPOSE_3T = dict(b0=3.0, tes_ms=(3, 7, 11, 15, 19, 23), dr_model="scaled", se=False, r2=True,
                      voxel=1.0, signal_model="decompose")
 
+_DECOMPOSE_3T_CHEN = dict(_DECOMPOSE_3T, tes_ms=tuple(round(2.7 + 2.9 * k, 1) for k in range(16)), tr=0.0593)
+
 PRESETS = {
     # As published by Ridani et al. (2026): noiseless, GRE-only, native resolution.
     "ridani-3t-iso": ChisepConfig(anisotropic=False, **_RIDANI_3T,
@@ -102,6 +104,12 @@ PRESETS = {
                                  description="3 T, DECOMPOSE three-pool signal, noiseless"),
     "decompose-3t-noise": ChisepConfig(noiseless=False, **_DECOMPOSE_3T,
                                        description="3 T, DECOMPOSE three-pool signal, peak SNR 100"),
+    # The same sources and signal with the in vivo protocol of Chen et al. (2021): 16 echoes,
+    # TE1/ΔTE/TE16 = 2.7/2.9/46.2 ms, TR 59.3 ms.
+    "decompose-3t-chen": ChisepConfig(noiseless=True, **_DECOMPOSE_3T_CHEN,
+                                      description="3 T, DECOMPOSE three-pool signal, Chen 2021 protocol, noiseless"),
+    "decompose-3t-chen-noise": ChisepConfig(noiseless=False, **_DECOMPOSE_3T_CHEN,
+                                            description="3 T, DECOMPOSE three-pool signal, Chen 2021 protocol, peak SNR 100"),
 }
 
 
@@ -169,8 +177,8 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
                          subject: str = "1", wm_rois: Optional[str] = None) -> dict:
     """Simulate one chi-sep phantom into a BIDS directory.
 
-    Writes the GRE (magnitude + phase), the optional spin echo, the field and local field, χ,
-    χ+ / |χ-|, R2' (the signal-derived value for the decompose model), the mask and segmentation,
+    Writes the GRE (magnitude + phase), the optional spin echo, the field and local field, χ, the
+    echo-dependent χ(TE) (``*_Chimap-echoes.nii``, 4D; DECOMPOSE-QSM's input), χ+ / |χ-|, R2' (the signal-derived value for the decompose model), the mask and segmentation,
     and — in ``derivatives/qsm-forward/sub-<subject>/anat`` — the fibre angle (``*_fibreangle.nii``,
     degrees, 0 where there is no fibre) and the ground-truth R2 when ``config.r2``. ``wm_rois`` is a
     label atlas on the native grid (e.g. Ridani's WM_fibers_seg.nii.gz) to resample next to them as
@@ -231,7 +239,7 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
             chisep_hc_b0=config.hc_b0,
             chisep_decompose=config.signal_model == "decompose",
             chisep_decompose_chi_c=config.decompose_chi_c,
-            save_se=config.se, save_r2=config.r2,
+            save_se=config.se, save_r2=config.r2, save_chi_echoes=True,
         )
 
     anat = os.path.join(bids_dir, "derivatives", "qsm-forward", f"sub-{subject}", "anat")
@@ -255,6 +263,9 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         out = os.path.join(anat, f"{stem}_desc-wmrois_dseg.nii")
         nib.save(nib.Nifti1Image(np.rint(lab).astype(np.int16), ref_nii.affine, ref_nii.header), out)
         written["wmrois"] = out
+    echoes = sorted(glob.glob(os.path.join(anat, "*_Chimap-echoes.nii*")))
+    if echoes:
+        written["chimap_echoes"] = echoes[0]
     r2s = sorted(glob.glob(os.path.join(anat, "*_R2map.nii*")))
     if r2s:
         written["r2"] = r2s[0]
