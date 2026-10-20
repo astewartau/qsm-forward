@@ -15,6 +15,8 @@ from .qsm_forward import (
     hc_compartment_freqs, hc_wm_signal, hc_wm_se_signal, hc_wm_r2prime,
     hc_mwf_from_myelin_content,
     WM_HC_PARAMS, GAMMA_BAR_HC,
+    decompose_pool_fractions, decompose_signal, decompose_r2prime,
+    DECOMPOSE_CHI_C, DECOMPOSE_F_MAX,
 )
 __all__ = [
     'generate_bids', 'generate_field', 'generate_signal', 'generate_se_signal', 'add_noise',
@@ -32,4 +34,6 @@ __all__ = [
     'hc_compartment_freqs', 'hc_wm_signal', 'hc_wm_se_signal', 'hc_wm_r2prime',
     'hc_mwf_from_myelin_content',
     'WM_HC_PARAMS', 'GAMMA_BAR_HC',
+    'decompose_pool_fractions', 'decompose_signal', 'decompose_r2prime',
+    'DECOMPOSE_CHI_C', 'DECOMPOSE_F_MAX',
 ]

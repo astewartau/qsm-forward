@@ -582,7 +582,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, chisep_decompose=False, chisep_decompose_chi_c=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -731,7 +731,14 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             rp_pos = dr if dr_pos_map is None else dr_pos_map
             rp_neg = (dr if dr_neg is None else dr_neg) if dr_neg_map is None else dr_neg_map
             r2prime_data = generate_r2prime(chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), dr=rp_pos, dr_neg=rp_neg)
-            if chisep_multicompartment and tissue_params.angle_map is not None:
+            if chisep_decompose:
+                # DECOMPOSE pools: the shipped R2' is what an R2*-minus-R2 fit extracts from
+                # the simulated signal over this acquisition's TEs, not Dr*|chi|.
+                r2prime_data = decompose_r2prime(
+                    chi_pos_nii.get_fdata(), chi_neg_nii.get_fdata(), recon_params.TEs, recon_params.B0,
+                    chi_c=DECOMPOSE_CHI_C if chisep_decompose_chi_c is None else chisep_decompose_chi_c)
+                print("  DECOMPOSE model: R2' derived from the simulated pool signal")
+            elif chisep_multicompartment and tissue_params.angle_map is not None:
                 # Multicompartment WM: the hollow-cylinder pool interference mechanistically
                 # supplies the diamagnetic/orientation-dependent reversible dephasing (the
                 # signal keeps only the paramagnetic Dr+*|chi+| as R2p_meso), so the shipped
@@ -777,7 +784,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if save_shimmed_offset_field: nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
     # The multi-compartment GRE model needs the chi-sep maps (chi+/chi-, R2, Dr), so it implies chisep_signal.
-    if chisep_multicompartment:
+    if chisep_multicompartment and chisep_decompose:
+        raise ValueError("chisep_multicompartment and chisep_decompose are separate signal models; pick one")
+    if chisep_multicompartment or chisep_decompose:
         chisep_signal = True
 
     # transverse relaxation (R2) — shared by the chi-sep GRE model and the SE signal
@@ -907,6 +916,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             theta=theta_data,
             wm_mask=wm_mask_data,
             hc_b0=chisep_hc_b0,
+            decompose=chisep_decompose,
+            decompose_chi_c=DECOMPOSE_CHI_C if chisep_decompose_chi_c is None else chisep_decompose_chi_c,
         )
     
         # k-space cropping of sigHR
@@ -2344,9 +2355,84 @@ def hc_wm_se_signal(TE, mwf, p=None):
             + fE * np.exp(-TE / q["T2_E"]))
 
 
+# ---------------------------------------------------------------------------
+# DECOMPOSE three-pool chi-sep signal model
+# ---------------------------------------------------------------------------
+# The signal model of DECOMPOSE-QSM (Chen J. et al., NeuroImage 2021;242:118477,
+# doi:10.1016/j.neuroimage.2021.118477): each voxel holds a paramagnetic, a diamagnetic
+# and a neutral water pool,
+#
+#   S(t) = C+ exp(-(R2 + a|χc+|) t) exp(-i ω χc+ t)
+#        + C- exp(-(R2 + a|χc-|) t) exp(+i ω |χc-| t)
+#        + C0 exp(-R2 t),
+#
+# with a = 2πγB0/(9√3) (static-dephasing broadening of spherical sources, γ in rad/s/T),
+# ω = (2/3)γB0, and χc± the susceptibility of the material each pool sees. The voxel
+# sources are the pool-weighted averages χ± = C±·χc±, so χ+ + χ- = χ_total — the map that
+# drives the macroscopic field — and the phantom's χ+/χ- ground truth is unchanged.
+#
+# The pools give the multi-echo magnitude a non-mono-exponential shape and the phase a
+# non-linear TE dependence: the sub-voxel signature DECOMPOSE separates sources from.
+
+DECOMPOSE_CHI_C = 0.2   # ppm, default pool susceptibility |χc±| (see decompose_pool_fractions)
+DECOMPOSE_F_MAX = 0.45  # cap on each source pool's fraction, so C0 ≥ 0.1
+
+
+def decompose_pool_fractions(chi_pos, chi_neg, chi_c=DECOMPOSE_CHI_C, f_max=DECOMPOSE_F_MAX):
+    """Split voxel sources χ+ ≥ 0 and χ- ≤ 0 (ppm) into DECOMPOSE pools.
+
+    Each source sits in a pool of fraction C± = |χ±| / chi_c, so every pool sees material
+    of susceptibility ±chi_c. Where that fraction would exceed ``f_max`` the pool is capped
+    and its susceptibility raised (|χc±| = |χ±| / f_max) instead, keeping C± ≤ f_max and
+    C0 = 1 - C+ - C- ≥ 1 - 2·f_max. Returns ``(C+, C-, C0, χc+, χc-)`` with χc- ≤ 0;
+    χc± = 0 where the voxel has no source of that sign."""
+    chi_pos = np.abs(np.asarray(chi_pos, dtype=float))
+    chi_neg = np.abs(np.asarray(chi_neg, dtype=float))
+    c_pos = np.minimum(chi_pos / chi_c, f_max)
+    c_neg = np.minimum(chi_neg / chi_c, f_max)
+    c_0 = 1.0 - c_pos - c_neg
+    with np.errstate(divide="ignore", invalid="ignore"):
+        chic_pos = np.where(c_pos > 0, chi_pos / np.where(c_pos > 0, c_pos, 1.0), 0.0)
+        chic_neg = -np.where(c_neg > 0, chi_neg / np.where(c_neg > 0, c_neg, 1.0), 0.0)
+    return c_pos, c_neg, c_0, chic_pos, chic_neg
+
+
+def decompose_signal(TE, chi_pos, chi_neg, B0, chi_c=DECOMPOSE_CHI_C, f_max=DECOMPOSE_F_MAX):
+    """Complex DECOMPOSE pool signal at echo time ``TE`` (s), relative to exp(-R2·TE).
+
+    Returned in qsm-forward's phase convention (phase = +2π·γ̄·B0·field·TE) with the
+    voxel's mean linear phase removed: the macroscopic field phase is applied by
+    :func:`generate_signal`'s bulk-phase term, so this factor carries only the pool
+    magnitude and the non-linear residual phase. At TE → 0 its phase slope is zero."""
+    gamma = 2 * np.pi * 42.58  # rad/s/T per ppm, as in DECOMPOSE
+    a = 2 * np.pi * gamma * B0 / (9 * np.sqrt(3))
+    w = (2.0 / 3.0) * gamma * B0
+    c_pos, c_neg, c_0, chic_pos, chic_neg = decompose_pool_fractions(chi_pos, chi_neg, chi_c, f_max)
+    chi_total = np.abs(np.asarray(chi_pos, dtype=float)) - np.abs(np.asarray(chi_neg, dtype=float))
+    # DECOMPOSE's own convention (pool phase -ω·χc·t) ...
+    P = (c_pos * np.exp(-a * chic_pos * TE) * np.exp(-1j * w * chic_pos * TE)
+         + c_neg * np.exp(a * chic_neg * TE) * np.exp(-1j * w * chic_neg * TE)
+         + c_0)
+    # ... with its mean linear phase -ω·χ_total·t removed, then conjugated into ours.
+    return np.conj(P * np.exp(1j * w * chi_total * TE))
+
+
+def decompose_r2prime(chi_pos, chi_neg, TEs, B0, chi_c=DECOMPOSE_CHI_C, f_max=DECOMPOSE_F_MAX):
+    """R2' (Hz) a mono-exponential R2* fit minus R2 extracts from the noiseless DECOMPOSE
+    signal over ``TEs``: the negated log-linear slope of |pool signal|. The common R2
+    decay factors out of every pool, so this is exact for any R2 map."""
+    TEs = np.asarray(TEs, dtype=float)
+    t = TEs - TEs.mean()
+    acc = 0.0
+    for te, tc in zip(TEs, t):
+        mag = np.abs(decompose_signal(te, chi_pos, chi_neg, B0, chi_c, f_max))
+        acc = acc + np.log(np.maximum(mag, 1e-12)) * tc
+    return np.maximum(-acc / (t ** 2).sum(), 0.0)
+
+
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
                     R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False,
-                    theta=None, wm_mask=None, hc_b0=None):
+                    theta=None, wm_mask=None, hc_b0=None, decompose=False, decompose_chi_c=DECOMPOSE_CHI_C):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -2405,6 +2491,14 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
         above the phantom's field-independent Dr=137 calibration scale — this
         knob lets the pool interference be evaluated at a chosen effective field.
         None (default) means use ``B0``. Only used by the multicompartment branch.
+    decompose : bool, optional
+        If True (with ``R2``, ``chi_pos`` and ``chi_neg``), every voxel uses the DECOMPOSE
+        three-pool model (see :func:`decompose_signal`): paramagnetic, diamagnetic and
+        neutral pools, each with its own decay and frequency. Exclusive with
+        ``multicompartment``. Default is False.
+    decompose_chi_c : float, optional
+        Pool susceptibility |χc±| in ppm for the DECOMPOSE model (see
+        :func:`decompose_pool_fractions`). Default is ``DECOMPOSE_CHI_C``.
 
     Returns
     -------
@@ -2415,7 +2509,15 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
 
     # Choose decay model
     chisep = R2 is not None and dr_pos is not None and dr_neg is not None and chi_pos is not None and chi_neg is not None
-    if chisep and multicompartment:
+    if decompose and multicompartment:
+        raise ValueError("decompose and multicompartment are separate signal models; pick one")
+    if decompose:
+        if R2 is None or chi_pos is None or chi_neg is None:
+            raise ValueError("decompose needs R2, chi_pos and chi_neg")
+        # DECOMPOSE three-pool model in every voxel; the bulk-field phase below carries
+        # the macroscopic frequency, decompose_signal the pool magnitude and residual phase.
+        decay = np.exp(-TE * R2) * decompose_signal(TE, chi_pos, chi_neg, B0, chi_c=decompose_chi_c)
+    elif chisep and multicompartment:
         # Hollow-cylinder multi-compartment chi-sep model (see the module-level
         # block above and prototypes/hollow_cylinder/). WHITE-MATTER voxels get
         # three theta-dependent water pools (myelin/axonal/extra-axonal), each with

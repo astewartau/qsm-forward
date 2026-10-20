@@ -97,6 +97,8 @@ def main():
         p.add_argument('--dr-neg', default=None, type=float, help='Optional separate diamagnetic relaxivity (Hz/ppm) for a split model')
         p.add_argument('--chisep-signal', nargs='?', type=argparse_bool, const=True, default=False, help='Use chi-sep-aware signal model (R2 + Dr*|chi|) instead of R2*')
         p.add_argument('--chisep-multicompartment', nargs='?', type=argparse_bool, const=True, default=False, help='Multi-compartment GRE magnitude (implies --chisep-signal)')
+        p.add_argument('--chisep-decompose', nargs='?', type=argparse_bool, const=True, default=False, help='DECOMPOSE three-pool GRE signal: paramagnetic, diamagnetic and neutral pools (implies --chisep-signal)')
+        p.add_argument('--chisep-decompose-chi-c', type=float, default=None, help='Pool susceptibility |chi_c| in ppm for --chisep-decompose (default 0.2)')
         p.add_argument('--anisotropy', nargs='?', type=argparse_bool, const=True, default=False, help='Enable WM susceptibility anisotropy (requires --v1 / angle map)')
 
     # head-specific
@@ -170,7 +172,9 @@ def main():
         save_shimmed_offset_field=args.save_shimmed_offset_field,
         save_chi_pos=args.save_chi_pos, save_chi_neg=args.save_chi_neg, save_r2prime=args.save_r2prime,
         dr=args.dr, dr_neg=args.dr_neg, chisep_signal=args.chisep_signal,
-        chisep_multicompartment=args.chisep_multicompartment, anisotropy=args.anisotropy,
+        chisep_multicompartment=args.chisep_multicompartment,
+        chisep_decompose=args.chisep_decompose, chisep_decompose_chi_c=args.chisep_decompose_chi_c,
+        anisotropy=args.anisotropy,
         save_r2=args.save_r2, save_dr_pos=args.save_dr_pos, save_dr_neg=args.save_dr_neg,
         save_t2=args.save_t2, save_se=args.save_se,
     )

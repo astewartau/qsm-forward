@@ -1267,3 +1267,48 @@ class TestMultiSliceAcquisition:
             # and the offsets really were present in the single-echo phase they cancelled out of
             single = np.angle(data["on"][0] * np.conj(data["off"][0]))[present]
             assert np.abs(single).max() > 1.0
+
+
+class TestDecomposeSignal:
+    """DECOMPOSE three-pool chi-sep signal model."""
+
+    B0 = 3.0
+    TES = np.array([3, 7, 11, 15, 19, 23]) * 1e-3
+
+    def test_pool_fractions_reproduce_sources(self):
+        chi_pos = np.array([0.0, 0.02, 0.15, 0.0])
+        chi_neg = np.array([0.0, -0.03, 0.0, -0.12])
+        c_pos, c_neg, c_0, chic_pos, chic_neg = qsm_forward.decompose_pool_fractions(chi_pos, chi_neg)
+        np.testing.assert_allclose(c_pos * chic_pos, chi_pos, atol=1e-12)
+        np.testing.assert_allclose(c_neg * chic_neg, chi_neg, atol=1e-12)
+        np.testing.assert_allclose(c_pos + c_neg + c_0, 1.0)
+        assert np.all(c_pos <= qsm_forward.DECOMPOSE_F_MAX) and np.all(c_0 >= 0)
+
+    def test_no_sources_is_mono_exponential(self):
+        S = [qsm_forward.decompose_signal(te, 0.0, 0.0, self.B0) for te in self.TES]
+        np.testing.assert_allclose(S, 1.0)
+
+    def test_no_bulk_phase_slope(self):
+        # The macroscopic phase is the field's; the pool factor's phase starts flat.
+        dt = 1e-6
+        S = qsm_forward.decompose_signal(dt, 0.1, -0.05, self.B0)
+        assert abs(np.angle(S)) / dt < 1e-2
+
+    def test_magnitude_is_not_mono_exponential(self):
+        mag = np.abs([qsm_forward.decompose_signal(te, 0.1, -0.05, self.B0) for te in self.TES])
+        slope, icpt = np.polyfit(self.TES, np.log(mag), 1)
+        resid = np.log(mag) - (slope * self.TES + icpt)
+        assert np.abs(resid).max() > 1e-3
+
+    def test_r2prime_matches_log_linear_fit(self):
+        chi_pos, chi_neg = 0.08, -0.04
+        mag = np.abs([qsm_forward.decompose_signal(te, chi_pos, chi_neg, self.B0) for te in self.TES])
+        slope = np.polyfit(self.TES, np.log(mag), 1)[0]
+        r2p = qsm_forward.decompose_r2prime(chi_pos, chi_neg, self.TES, self.B0)
+        assert r2p == pytest.approx(-slope, rel=1e-9)
+
+    def test_generate_signal_rejects_both_models(self):
+        with pytest.raises(ValueError):
+            qsm_forward.generate_signal(np.zeros(2), R2=np.ones(2), dr_pos=1, dr_neg=1,
+                                        chi_pos=np.zeros(2), chi_neg=np.zeros(2),
+                                        multicompartment=True, decompose=True)
