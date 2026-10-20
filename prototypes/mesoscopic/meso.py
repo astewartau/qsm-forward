@@ -276,10 +276,11 @@ class Voxel:
     sphere3d: Sampler3D | None          # maps (Gxx,Gxz,Gzz) x n_levels, unit chi
     sphere_levels: list = field(default_factory=list)   # zeta per nested level
     chi_sheath_mean: float = 0.0        # tr/3 of sheath tensor (ppm)
+    Ls: float = 0.0                     # sphere / walker box side (= sphere_tile * L)
 
 
 def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
-                chi_i=-0.12, chi_a=-0.10, rng=None, axon_kw=None):
+                chi_i=-0.12, chi_a=-0.10, rng=None, axon_kw=None, sphere_tile=1):
     """Build geometry + basis maps.
 
     Sheath tensor in the Wharton & Bowtell (2012) parameterisation,
@@ -288,7 +289,11 @@ def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
 
     ``zetas``: increasing list of sphere volume fractions; the sphere sets are nested
     (level k uses the first N_k spheres), and basis maps are stored per *increment*
-    so that the cumulative field at level k is the sum over increments <= k."""
+    so that the cumulative field at level k is the sum over increments <= k.
+
+    ``sphere_tile`` (integer m): spheres live in a periodic box of side m*L on an
+    n3d^3 grid, with the myelin pattern tiled m x m times. This gives m^3 more iron
+    clusters per realisation (less configuration variance) at no myelin-grid cost."""
     rng = np.random.default_rng(rng)
     pk = pack_axons(L, fvf, g=g, rng=rng, **(axon_kw or {}))
     cxx, cxy, czz, lab = raster_axons(pk, n2d, chi_i - chi_a / 2, 1.5 * chi_a)
@@ -297,18 +302,20 @@ def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
     s2d = Sampler2D([M1, M2], L)
     s3d = None
     zetas = [z for z in zetas if z > 0]
+    Ls = sphere_tile * L
     if zetas:
-        allc = place_spheres(L, max(zetas), sphere_radius, rng)
-        nk = [int(round(z * L ** 3 / (4 / 3 * np.pi * sphere_radius ** 3))) for z in zetas]
+        allc = place_spheres(Ls, max(zetas), sphere_radius, rng)
+        nk = [int(round(z * Ls ** 3 / (4 / 3 * np.pi * sphere_radius ** 3))) for z in zetas]
         maps = []
         prev = 0
         for k in nk:
-            S = raster_spheres(allc[prev:k], sphere_radius, L, n3d)
-            maps += sphere_basis(S, L)
+            S = raster_spheres(allc[prev:k], sphere_radius, Ls, n3d)
+            maps += sphere_basis(S, Ls)
             prev = k
-        s3d = Sampler3D(maps, L)
+        s3d = Sampler3D(maps, Ls)
+        del maps
     chi_mean = chi_i   # tr/3 of the sheath tensor
-    return Voxel(L, pk, lab, s2d, s3d, zetas, chi_mean)
+    return Voxel(L, pk, lab, s2d, s3d, zetas, chi_mean, Ls)
 
 
 def init_walkers(vox: Voxel, n_per_comp, rng=None):
@@ -323,7 +330,7 @@ def init_walkers(vox: Voxel, n_per_comp, rng=None):
             continue
         got = 0
         while got < n_per_comp:
-            p = rng.uniform(0, vox.L, (4 * n_per_comp, 3))
+            p = rng.uniform(0, vox.Ls or vox.L, (4 * n_per_comp, 3))
             i, j = vox.myelin2d.idx(p[:, :2])
             p = p[lab[i, j] == ci][: n_per_comp - got]
             pos.append(p)

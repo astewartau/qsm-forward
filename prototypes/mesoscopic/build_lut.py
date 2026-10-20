@@ -35,7 +35,8 @@ TE_SE = np.arange(0, 80.0001, 1.0)       # ms (TE/2 on the GRE grid)
 PARAMS = dict(
     L=60.0,               # box side, um
     n2d=4096,             # myelin grid (0.0146 um)
-    n3d=128,              # sphere grid (0.47 um)
+    n3d=256,              # sphere grid (0.47 um over sphere_tile*L)
+    sphere_tile=2,        # sphere box = 2L = 120 um (8x more iron clusters)
     g=0.7,                # g-ratio
     chi_i=-0.12,          # sheath mean susceptibility, ppm (W&B chi_I)
     chi_a=-0.10,          # sheath anisotropy, ppm (W&B chi_A)
@@ -68,11 +69,13 @@ def run(geom, seed, mode, outdir, p=PARAMS):
     zetas = list(CHI_POS[CHI_POS > 0] / p["dchi_fe"])
     rng = np.random.default_rng([geom, seed, 0 if mode == "static" else 1])
     vox = meso.build_voxel(p["L"], G["fvf"], zetas, p["r_fe"], n2d=p["n2d"], n3d=p["n3d"],
-                           g=p["g"], chi_i=p["chi_i"], chi_a=p["chi_a"], rng=rng)
+                           g=p["g"], chi_i=p["chi_i"], chi_a=p["chi_a"], rng=rng,
+                           sphere_tile=p["sphere_tile"])
     # exact achieved fractions -> exact ground truth
     vsph = 4 / 3 * np.pi * p["r_fe"] ** 3
-    n_k = [int(round(z * p["L"] ** 3 / vsph)) for z in zetas]
-    zeta_eff = np.array(n_k) * vsph / p["L"] ** 3
+    Ls = p["L"] * p["sphere_tile"]
+    n_k = [int(round(z * Ls ** 3 / vsph)) for z in zetas]
+    zeta_eff = np.array(n_k) * vsph / Ls ** 3
     mvf = vox.packing.mvf
     print(f"geom {geom} fvf={vox.packing.fvf:.3f} mvf={mvf:.3f} build {time.time()-t0:.1f}s",
           flush=True)
