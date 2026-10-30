@@ -582,7 +582,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False, r2prime_source="formula"):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False, r2prime_source="formula", signal_factor=None):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -635,6 +635,13 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         magnitude decays with R2 (not R2*). Enables deriving R2' = R2* - R2 from
         an SE/GRE pair. Uses recon_params.se_TR and recon_params.se_TEs. Default
         is False.
+    signal_factor : object or None
+        A per-voxel signal model that replaces the chi-sep decay envelope where it applies
+        (e.g. :class:`qsm_forward.mesoscopic.MesoscopicSignal`). ``signal_factor.gre(TE, R2)``
+        returns ``(mask, complex values)`` for the GRE and ``signal_factor.se(TE, R2)``
+        ``(mask, magnitude factor)`` or None for the spin echo; the macroscopic field phase and
+        steady-state weighting are applied on top, and the chi-sep model stays elsewhere.
+        Implies ``chisep_signal``.
     r2prime_source : {"formula", "fitted"}
         What the saved ``*_R2prime.nii`` holds when ``save_r2prime``. "formula"
         (default) is the R2' the generator imposes (Dr+|chi+| + Dr-|chi-|, or the
@@ -794,7 +801,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         if save_shimmed_offset_field: nib.save(grid.resample_map(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
     # The multi-compartment GRE model needs the chi-sep maps (chi+/chi-, R2, Dr), so it implies chisep_signal.
-    if chisep_multicompartment:
+    if chisep_multicompartment or signal_factor is not None:
         chisep_signal = True
 
     # transverse relaxation (R2) — shared by the chi-sep GRE model and the SE signal
@@ -929,6 +936,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             theta=theta_data,
             wm_mask=wm_mask_data,
             hc_b0=chisep_hc_b0,
+            decay_override=None if signal_factor is None else signal_factor.gre(recon_params.TEs[i], R2_data),
         )
     
         # k-space cropping of sigHR
@@ -1039,6 +1047,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             )
             if se_wm_mask is not None:
                 sigHR[se_wm_mask] = se_spgr[se_wm_mask] * hc_wm_se_signal(se_TEs[i], se_mwf)
+            se_override = None if signal_factor is None else signal_factor.se(se_TEs[i], R2_data)
+            if se_override is not None:
+                se_mask, se_values = se_override
+                se_spgr_f = generate_se_signal(TR=se_TR, TE=0.0, R1=R1_data, R2=0.0,
+                                               M0=tissue_params.M0.get_fdata())
+                sigHR[se_mask] = se_spgr_f[se_mask] * se_values
             sigHR = sigHR.astype(np.complex128)
 
             # k-space cropping of sigHR
@@ -2442,7 +2456,7 @@ def hc_wm_se_signal(TE, mwf, p=None):
 
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
                     R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False,
-                    theta=None, wm_mask=None, hc_b0=None):
+                    theta=None, wm_mask=None, hc_b0=None, decay_override=None):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -2501,6 +2515,10 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
         above the phantom's field-independent Dr=137 calibration scale — this
         knob lets the pool interference be evaluated at a chosen effective field.
         None (default) means use ``B0``. Only used by the multicompartment branch.
+    decay_override : (mask, values) or None, optional
+        Replaces the decay envelope in ``mask`` voxels with the complex ``values`` (one per
+        mask voxel), e.g. a mesoscopic signal model's factor; the field phase and steady-state
+        weighting are applied on top. Default None.
 
     Returns
     -------
@@ -2552,6 +2570,11 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
     else:
         # Standard R2* model
         decay = np.exp(-TE * R2star)
+
+    if decay_override is not None:
+        ov_mask, ov_values = decay_override
+        decay = np.array(np.broadcast_to(decay, np.shape(ov_mask)), dtype=np.complex128)
+        decay[ov_mask] = ov_values
 
     sigHR = M0 * np.exp(1j * (2 * np.pi * field * B0 * 42.58 * TE + phase_offset)) * decay \
         * (1 - np.exp(-TR * R1)) * np.sin(np.deg2rad(flip_angle)) / (1 - np.cos(np.deg2rad(flip_angle)) * np.exp(-TR * R1))

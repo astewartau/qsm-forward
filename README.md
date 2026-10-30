@@ -306,10 +306,17 @@ qsm-forward chi-sep ~/data bids --B0 7 --voxel-size 1 1 1 --peak-snr 100 --save-
 | `linear-3t-dr114` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 114 | tissue | fitted |
 | `linear-3t-dr324` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 323.5 (2πγB0/(9√3)) | tissue | fitted |
 | `r2star-3t` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 141.7 | (274 − Dr)·(\|χ⁺\| + \|χ⁻\|) | fitted |
+| `meso-3t` | 3 T | 1 mm | 2.7:2.9:46.2 | 10:20:70 | SNR 100 | mesoscopic sub-voxel sources (diffusion LUT) | tissue | fitted |
+| `wm-micro-7t` | 7 T | 1 mm | 3:6:45 | 10:20:70 | SNR 100 | mesoscopic sub-voxel sources (diffusion LUT) | tissue | fitted |
+| `spheres-3t-paper` | 3 T | 1 mm | 2.7:2.9:46.2 | 10:20:70 | SNR 100 | water-containing spheres, intra-source water at (2/3)χγB0 | tissue | fitted |
+| `spheres-3t-lorentz` | 3 T | 1 mm | 2.7:2.9:46.2 | 10:20:70 | SNR 100 | water-containing spheres, Lorentz-corrected | tissue | fitted |
 
 - **Region-disjoint** (Ridani et al., 2026): only χ⁺ relaxes outside white matter and only χ⁻ inside it. **Co-located**: both sources relax in every voxel with one relaxivity, mono-exponential, phase linear in TE.
 - `r2star-3t` makes R2\* = 274·(|χ⁺| + |χ⁻|) hold exactly (Dimov et al., 2022). Its R2 is zero wherever there is no source (e.g. CSF), which is not physical.
 - **Shipped R2′.** *formula* is the R2′ the generator imposes. *fitted* is R2\* − R2 from log-linear fits of the noiseless GRE and spin echo over the protocol's echo times (the spin echo is simulated for the fit even when it is not saved). With *fitted*, the formula map is also written as `*_desc-formula_R2prime.nii`. `--r2prime-source` overrides a preset's choice.
+- **Mesoscopic** (`qsm_forward.mesoscopic`): brain voxels get the signal of explicit sub-voxel sources from a look-up table: myelinated axons as hollow cylinders with the Wharton & Bowtell sheath tensor, and iron as clusters plus ferritin-scale spheres (Dr⁺ ≈ 140 Hz/ppm at 3 T emerges from the diffusion table). White matter uses its fibre angle, other tissue the orientation average. χ⁻ is scored as the orientation-independent sheath χ·MVF; the field follows the apparent χ⁻ (`*_desc-apparent_Chimap-neg.nii`).
+- **Spheres** (after Chen et al., 2021): water-containing para- and diamagnetic spheres, static dephasing, in two intra-source conventions. `*_Chimap-echoes.nii` is the per-echo χ(TE): the ground-truth χ plus the echo dependence of a per-echo STAR-QSM reconstruction of the noiseless signal. This needs QSM.rs's `star_file` and `laplacian_unwrap_file` example binaries (`$QSM_FORWARD_QSMRS_BIN`).
+- The look-up tables are not in the repository: point `$QSM_FORWARD_MESO_LUT_DIR` at a directory holding them.
 - Each phantom writes `*_chisep.json` next to its derivatives: the configuration and the relaxivity it imposes.
 
 The Python `generate_bids(...)` example below shows the lower-level API (a single Dr kernel, no orientation dependence); the `chi-sep` subcommand wraps `generate_dr_maps_ridani` to build the source- and orientation-dependent relaxivity described later.
