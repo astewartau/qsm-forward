@@ -59,6 +59,16 @@ Signal models (``signal_model``):
                    so STAR's own echo dependence cancels and only the tissue's remains (zero
                    for a linear phase; ≈ 0 with the Lorentz convention)
                    (:func:`qsm_forward.mesoscopic.star_chimap_echoes`).
+                   Bulk χ± become sphere volume fractions ζ± and source susceptibilities χ_s±
+                   (ζ·χ_s = bulk) by ``sphere_source_range``: "in-range" (the default) keeps
+                   χ_s <= ``sphere_chi_s_max`` (default: the source-phase limit
+                   π/((2/3)γB0·TE_max), 0.127 ppm for 16 echoes to 46.2 ms; inside Chen et al.
+                   2021's simulated 0.01-0.15 ppm) and reaches the bulk by the fraction, up to a
+                   total ζ+ + ζ- of ``sphere_zeta_total_max`` (0.60); beyond that χ_s rises and
+                   the voxel is flagged in ``*_desc-sourcerange_mask`` (1; 2 = χ_s clipped at the
+                   LUT's last node). "highchi" is the earlier mapping (ζ <= 0.35, χ_s up to 0.40
+                   ppm in deep grey matter): outside the authors' validated range, a robustness
+                   phantom only (presets ``spheres-3t-*-highchi``).
   Both need ``relaxation="linear"``: its ``dr`` is the nominal relaxivity recorded in the
   sidecar, used outside the brain labels and for the ``*_desc-formula_R2prime`` reference; the
   signal itself takes no relaxivity.
@@ -152,6 +162,9 @@ class ChisepConfig:
     meso_lut: Optional[str] = None   # "mesoscopic"/"spheres": LUT path (default: mesoscopic.lut_path)
     sphere_convention: str = "decompose"  # "spheres": "decompose" | "lorentz"
     chimap_echoes: bool = False    # "spheres": write the per-echo χ(TE) (needs QSM.rs's STAR)
+    sphere_source_range: str = "in-range"  # "spheres": "in-range" | "highchi" (mesoscopic.SourceMapping)
+    sphere_chi_s_max: Optional[float] = None  # "in-range": χ_s cap, ppm (None: source-phase limit at max TE)
+    sphere_zeta_total_max: float = mesoscopic.ZETA_TOTAL_MAX  # "in-range": cap on ζ+ + ζ-
     r2prime_source: str = "formula"  # see R2PRIME_SOURCES
     peak_snr: float = 100.0
     noiseless: bool = False
@@ -181,6 +194,9 @@ class ChisepConfig:
             raise ValueError("signal_model='hollow-cylinder' is defined for relaxation='ridani'")
         check("meso_table", MESO_TABLES)
         check("sphere_convention", mesoscopic.SPHERE_CONVENTIONS)
+        check("sphere_source_range", mesoscopic.SOURCE_RANGES)
+        if not 0 < self.sphere_zeta_total_max < 1:
+            raise ValueError("sphere_zeta_total_max must be in (0, 1)")
         if self.signal_model in ("mesoscopic", "spheres") and self.relaxation != "linear":
             raise ValueError(f"signal_model={self.signal_model!r} needs relaxation='linear' (its dr is the "
                              "nominal relaxivity outside the brain labels and of the formula R2')")
@@ -237,12 +253,28 @@ PRESETS = {
                                 b0=7.0, tes_ms=(3, 9, 15, 21, 27, 33, 39, 45), **_MESO,
                                 description="7 T mesoscopic white-matter microstructure (hollow cylinders; diffusion)"),
     # Water-containing spheres after Chen et al. 2021, per-echo χ(TE); one per intra-source convention.
+    # Source χ_s inside the authors' simulated range (<= the source-phase limit, 0.127 ppm), the bulk
+    # reached by the volume fraction (ζ+ + ζ- <= 0.60; beyond it flagged in desc-sourcerange_mask).
     "spheres-3t-paper": ChisepConfig(signal_model="spheres", sphere_convention="decompose", chimap_echoes=True,
                                      dr=dr_static_dephasing(3.0), **_CHEN_3T, **_MESO,
-                                     description="3 T water-containing sub-voxel spheres, intra-source water at (2/3)χγB0"),
+                                     description="3 T water-containing sub-voxel spheres, intra-source water at (2/3)χγB0, "
+                                                 "source χ in the authors' range"),
     "spheres-3t-lorentz": ChisepConfig(signal_model="spheres", sphere_convention="lorentz", chimap_echoes=True,
                                        dr=dr_static_dephasing(3.0), **_CHEN_3T, **_MESO,
-                                       description="3 T water-containing sub-voxel spheres, Lorentz-corrected intra-source field"),
+                                       description="3 T water-containing sub-voxel spheres, Lorentz-corrected intra-source field, "
+                                                   "source χ in the authors' range"),
+    # Robustness only: the earlier mapping (ζ <= 0.35, source χ up to 0.40 ppm in deep grey matter),
+    # OUTSIDE the authors' validated 0.01-0.15 ppm; intra-voxel beats DECOMPOSE's model can't fit.
+    "spheres-3t-paper-highchi": ChisepConfig(signal_model="spheres", sphere_convention="decompose", chimap_echoes=True,
+                                             sphere_source_range="highchi", dr=dr_static_dephasing(3.0),
+                                             **_CHEN_3T, **_MESO,
+                                             description="3 T water-containing spheres, (2/3)χγB0 convention, source χ up to "
+                                                         "0.40 ppm (outside the authors' range; robustness)"),
+    "spheres-3t-lorentz-highchi": ChisepConfig(signal_model="spheres", sphere_convention="lorentz", chimap_echoes=True,
+                                               sphere_source_range="highchi", dr=dr_static_dephasing(3.0),
+                                               **_CHEN_3T, **_MESO,
+                                               description="3 T water-containing spheres, Lorentz-corrected, source χ up to "
+                                                           "0.40 ppm (outside the authors' range; robustness)"),
 }
 
 
@@ -343,8 +375,17 @@ def signal_factor(config: ChisepConfig, lut, chi_pos, chi_neg, theta_deg, seg):
         return mesoscopic.MesoscopicSignal(lut, chi_pos, chi_neg, theta_deg, seg, config.b0,
                                            se_tes_ms=config.se_tes_ms)
     if config.signal_model == "spheres":
-        return mesoscopic.SphereSignal(lut, chi_pos, chi_neg, seg, config.b0, config.sphere_convention)
+        return mesoscopic.SphereSignal(lut, chi_pos, chi_neg, seg, config.b0, config.sphere_convention,
+                                       mapping=sphere_mapping(config))
     return None
+
+
+def sphere_mapping(config: ChisepConfig) -> "mesoscopic.SourceMapping":
+    """Bulk χ± -> sphere parameters for ``config.sphere_source_range`` (see the module docstring)."""
+    if config.sphere_source_range == "highchi":
+        return mesoscopic.HIGHCHI
+    cap = config.sphere_chi_s_max or float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0))
+    return mesoscopic.SourceMapping("in-range", cap, config.sphere_zeta_total_max)
 
 
 def fibre_theta(theta_deg, seg):
@@ -513,7 +554,13 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
     elif config.signal_model == "spheres":
         meta["SignalModel"] = {"Model": "spheres", "Convention": config.sphere_convention,
                                "LUT": os.path.basename(lut.path),
-                               "WrapLimitPpm": float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0))}
+                               "WrapLimitPpm": float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0)),
+                               "Sources": factor.source_report(max(config.tes_ms))}
+        flag = np.zeros(factor.mask.shape, np.uint8)
+        flag[factor.mask] = factor.source_flag
+        out = os.path.join(anat, f"{stem}_desc-sourcerange_mask.nii")
+        nib.save(nib.Nifti1Image(flag, ref_nii.affine, ref_nii.header), out)
+        written["sourcerange_mask"] = out
         if config.chimap_echoes:
             written["chimap_echoes"] = write_chimap_echoes(anat, stem, config, factor)
             meta["SignalModel"]["ChimapEchoes"] = (
@@ -549,7 +596,8 @@ def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, un
         raise ValueError("chimap_echoes needs the signal simulated on the output grid")
     tes = np.asarray(config.tes_ms, float)
     intra = np.zeros((len(tes),) + local.shape)
-    ph = factor.lut.unwrapped_phase(factor._cp, factor._cn, tes, factor.convention, factor.interp)
+    ph = factor.lut.unwrapped_phase(factor._cp, factor._cn, tes, factor.convention, factor.interp,
+                                    mapping=factor.mapping)
     intra[:, factor.mask] = ph.T
     phases = mesoscopic.echo_local_phases(local, tes, config.b0, intra)
     ref_phases = mesoscopic.echo_local_phases(local, tes, config.b0)

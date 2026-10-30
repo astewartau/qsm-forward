@@ -97,7 +97,7 @@ LUT_ENV = "QSM_FORWARD_MESO_LUT_DIR"
 LUT_FILES = {
     "diffusion": "meso_diffusion_v3.npz",
     "static": "meso_static_v3.npz",
-    "spheres": "spheres_a3_v1.npz",
+    "spheres": "spheres_a3_v2.npz",
 }
 
 
@@ -394,17 +394,24 @@ class MesoscopicSignal:
 # water-containing spheres (DECOMPOSE-targeted, A3)
 # ----------------------------------------------------------------------------------------
 SPHERE_CONVENTIONS = ("decompose", "lorentz")
-# source_params: ζ = ZETA_REF while χ_s rises 0.01 -> 0.15 ppm (Chen 2021's range), then ζ
-# rises to ZETA_MAX, then χ_s rises above the paper's range.
+SOURCE_RANGES = ("in-range", "highchi")
+# source_params ("highchi"): ζ = ZETA_REF while χ_s rises 0.01 -> 0.15 ppm (Chen 2021's range), then
+# ζ rises to ZETA_MAX, then χ_s rises above the paper's range.
 ZETA_REF, ZETA_MAX, CHI_S_MIN, CHI_S_PAPER = 0.25, 0.35, 0.01, 0.15
+# "in-range": χ_s stays at or below a cap and the bulk χ is reached by the volume fraction, up to a
+# total source fraction ζ+ + ζ- of ZETA_TOTAL_MAX (the water medium stays the larger part of the voxel;
+# beyond about 0.6 the "spheres in water" picture no longer holds: same-sign spheres merge).
+ZETA_TOTAL_MAX = 0.60
+# source-range flags (``*_desc-sourcerange_mask``)
+SRC_IN_RANGE, SRC_CHI_S_ABOVE_CAP, SRC_CHI_S_CLIPPED = 0, 1, 2
 
 
 def source_params(chi_bulk):
-    """Bulk susceptibility (either sign) -> (ζ, χ_s >= 0) with ζ·χ_s = |bulk| exactly.
+    """The ``highchi`` mapping, one sign: bulk susceptibility -> (ζ, χ_s >= 0) with ζ·χ_s = |bulk|.
 
     |bulk| <= 0.0375 ppm: ζ = 0.25 (below 0.0025 ppm: χ_s = 0.01, ζ < 0.25) and χ_s 0.01-0.15;
     up to 0.0525 ppm: χ_s = 0.15, ζ 0.25-0.35; above: ζ = 0.35, χ_s = |bulk|/0.35 (outside
-    the paper's χ_s range)."""
+    the paper's χ_s range: up to 0.40 ppm in the pallidus)."""
     b = np.abs(np.asarray(chi_bulk, float))
     chi_s = np.clip(b / ZETA_REF, CHI_S_MIN, CHI_S_PAPER)
     chi_s = np.where(b > ZETA_MAX * CHI_S_PAPER, b / ZETA_MAX, chi_s)
@@ -412,14 +419,93 @@ def source_params(chi_bulk):
     return zeta, chi_s
 
 
+def source_params_inrange(chi_pos, chi_neg, chi_s_max, zeta_total_max=ZETA_TOTAL_MAX):
+    """The ``in-range`` mapping, both signs jointly: bulk χ+ >= 0, χ- <= 0 -> (ζ+, ζ-, χ_s+, χ_s-,
+    capped) with ζ±·χ_s± = |χ±| exactly.
+
+    * Each sign prefers ζ = ZETA_REF (0.25) with χ_s = |χ|/0.25 in [0.01, ``chi_s_max``], as the
+      ``highchi`` mapping does at low bulk.
+    * A sign whose bulk needs more than that keeps χ_s = ``chi_s_max`` and raises ζ = |χ|/χ_s_max.
+    * If ζ+ + ζ- exceeds ``zeta_total_max``, the preferred-fraction surplus (above the minimum
+      |χ|/χ_s_max) is given up first, which raises that sign's χ_s toward the cap.
+    * Only when even the minimum fractions sum above ``zeta_total_max`` are both scaled down to
+      sum to it; χ_s then exceeds ``chi_s_max`` there and ``capped`` is True. The anatomy (bulk
+      χ±) is never changed."""
+    bp = np.abs(np.asarray(chi_pos, float))
+    bm = np.abs(np.asarray(chi_neg, float))
+    need_p, need_m = bp / chi_s_max, bm / chi_s_max
+    pref_p = np.maximum(need_p, np.minimum(ZETA_REF, bp / CHI_S_MIN))
+    pref_m = np.maximum(need_m, np.minimum(ZETA_REF, bm / CHI_S_MIN))
+    need, pref = need_p + need_m, pref_p + pref_m
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f = np.clip(np.where(pref > need, (zeta_total_max - need) / (pref - need), 1.0), 0.0, 1.0)
+        zp = need_p + (pref_p - need_p) * f
+        zm = need_m + (pref_m - need_m) * f
+        capped = need > zeta_total_max
+        g = np.where(capped, zeta_total_max / need, 1.0)
+        zp, zm = np.where(capped, need_p * g, zp), np.where(capped, need_m * g, zm)
+        zp, zm = np.minimum(zp, zeta_total_max), np.minimum(zm, zeta_total_max)   # rounding only
+        sp = np.where(zp > 0, bp / zp, CHI_S_MIN)
+        sm = np.where(zm > 0, bm / zm, CHI_S_MIN)
+    return zp, zm, sp, sm, capped
+
+
+class SourceMapping:
+    """Bulk (χ+, χ-) -> sphere parameters (ζ+, ζ-, χ_s+, χ_s-) and a per-voxel source-range flag.
+
+    ``kind="in-range"`` (:func:`source_params_inrange`): χ_s <= ``chi_s_max`` (by default the source
+    phase limit π/((2/3)γB0·TE_max) of the protocol, inside Chen et al. 2021's simulated 0.01-0.15
+    ppm) wherever ζ+ + ζ- <= ``zeta_total_max`` suffices. ``kind="highchi"``
+    (:func:`source_params`): ζ <= 0.35 per sign, χ_s up to 0.40 ppm in deep grey matter (outside the
+    authors' validated range; robustness only).
+
+    Flags: 0 in range, 1 χ_s above the cap (in-range: the fraction cap binds; highchi: χ_s > 0.15),
+    2 χ_s clipped at the LUT's last node (the signal then under-represents the bulk χ)."""
+
+    def __init__(self, kind="in-range", chi_s_max=None, zeta_total_max=ZETA_TOTAL_MAX):
+        if kind not in SOURCE_RANGES:
+            raise ValueError(f"source range must be one of {SOURCE_RANGES}, got {kind!r}")
+        if kind == "in-range" and not (chi_s_max and chi_s_max > 0):
+            raise ValueError("the in-range mapping needs a positive chi_s_max (ppm)")
+        self.kind, self.chi_s_max, self.zeta_total_max = kind, chi_s_max, zeta_total_max
+
+    def __call__(self, chi_pos, chi_neg, chi_s_lut_max=np.inf):
+        cp, cn = np.maximum(chi_pos, 0), np.minimum(chi_neg, 0)
+        if self.kind == "in-range":
+            zp, zm, sp, sm, capped = source_params_inrange(cp, cn, self.chi_s_max, self.zeta_total_max)
+            above = capped
+        else:
+            (zp, sp), (zm, sm) = source_params(cp), source_params(cn)
+            above = (sp > CHI_S_PAPER + 1e-9) | (sm > CHI_S_PAPER + 1e-9)
+        flag = np.where(above, SRC_CHI_S_ABOVE_CAP, SRC_IN_RANGE)
+        flag = np.where((sp > chi_s_lut_max + 1e-9) | (sm > chi_s_lut_max + 1e-9), SRC_CHI_S_CLIPPED, flag)
+        return zp, zm, sp, sm, flag.astype(np.uint8)
+
+    def describe(self):
+        if self.kind == "in-range":
+            return {"SourceRange": "in-range", "ChiSMaxPpm": float(self.chi_s_max),
+                    "ZetaTotalMax": float(self.zeta_total_max), "ZetaRef": ZETA_REF, "ChiSMinPpm": CHI_S_MIN}
+        return {"SourceRange": "highchi", "ZetaRef": ZETA_REF, "ZetaMax": ZETA_MAX, "ChiSPaperPpm": CHI_S_PAPER,
+                "Note": "χ_s exceeds Chen et al. 2021's simulated 0.01-0.15 ppm in deep grey matter "
+                        "(outside the authors' validated range; a robustness phantom)"}
+
+
+HIGHCHI = SourceMapping("highchi")
+
+
 def wrap_limit_ppm(te_max_ms, b0=3.0):
-    """|χ| above which DECOMPOSE's synthesised phase (2/3)γB0·χ·TE leaves (-π, π] at TE_max."""
+    """|χ| above which DECOMPOSE's synthesised phase (2/3)γB0·χ·TE leaves (-π, π] at TE_max. Also the
+    source-phase limit: intra-source water ((2/3)χ_s γB0 in the ``decompose`` convention) beats against
+    the medium within the echo train once χ_s exceeds it."""
     return np.pi / ((2.0 / 3.0) * GAMMA * b0 * 1e-6 * te_max_ms)
 
 
 class SphereLUT:
     """Reader of the sphere LUT: ``S_<convention>[ζ+, ζ-, χ_s+, χ_s-, TE]`` (complex), axes
-    ``zeta``, ``chi_s``, ``te`` (ms) and ``b0``."""
+    ``zeta``, ``chi_s``, ``te`` (ms) and ``b0``. v2 tables (``spheres_a3_v2.npz``) run ζ to 0.60 and
+    hold node pairs with ζ+ + ζ- <= ``zeta_pair_max`` (0.70; ``built``); their v1 nodes (ζ <= 0.35)
+    are identical to v1's. Every method takes a ``mapping`` (:class:`SourceMapping`; default the
+    ``highchi`` one, the v1 behaviour)."""
 
     def __init__(self, path):
         d = np.load(path)
@@ -429,6 +515,7 @@ class SphereLUT:
         self.te = np.asarray(d["te"], float)
         self.b0 = float(d["b0"])
         self._S = {c: np.asarray(d[f"S_{c}"]) for c in SPHERE_CONVENTIONS if f"S_{c}" in d.files}
+        self.zeta_pair_max = float(d["zeta_pair_max"]) if "zeta_pair_max" in d.files else 2 * self.zeta[-1]
         self._f = {}
 
     def _interp(self, conv, log):
@@ -441,9 +528,25 @@ class SphereLUT:
             self._f[key] = RegularGridInterpolator((self.zeta, self.zeta, self.chi_s, self.chi_s, self.te), vals)
         return self._f[key]
 
-    def _q(self, chi_pos, chi_neg, te_ms):
-        zp, sp = source_params(np.maximum(chi_pos, 0))
-        zm, sm = source_params(np.minimum(chi_neg, 0))
+    def check_mapping(self, mapping):
+        """The table must cover the mapping's fractions: every interpolation cell's corners built."""
+        zmax = mapping.zeta_total_max if mapping.kind == "in-range" else ZETA_MAX
+        step = float(np.max(np.diff(self.zeta)))
+        if zmax > self.zeta[-1] + 1e-9 or zmax + 2 * step > self.zeta_pair_max + 1e-9:
+            raise ValueError(f"{os.path.basename(self.path)} covers ζ <= {self.zeta[-1]:.2f} (pairs <= "
+                             f"{self.zeta_pair_max:.2f}); the {mapping.kind} mapping needs ζ+ + ζ- up to "
+                             f"{zmax:.2f} (use spheres_a3_v2.npz)")
+
+    def params(self, chi_pos, chi_neg, mapping=None):
+        """(ζ+, ζ-, χ_s+, χ_s-, flag) of ``mapping`` for bulk χ+ >= 0, χ- <= 0."""
+        return (mapping or HIGHCHI)(chi_pos, chi_neg, self.chi_s[-1])
+
+    def _q(self, chi_pos, chi_neg, te_ms, mapping=None):
+        mapping = mapping or HIGHCHI
+        self.check_mapping(mapping)
+        zp, zm, sp, sm, _ = self.params(chi_pos, chi_neg, mapping)
+        zp = np.clip(zp, self.zeta[0], self.zeta[-1])      # rounding only (the mapping caps ζ)
+        zm = np.clip(zm, self.zeta[0], self.zeta[-1])
         sp = np.clip(sp, self.chi_s[0], self.chi_s[-1])
         sm = np.clip(sm, self.chi_s[0], self.chi_s[-1])
         te_ms = np.clip(np.atleast_1d(np.asarray(te_ms, float)), self.te[0], self.te[-1])
@@ -453,40 +556,40 @@ class SphereLUT:
         q[..., 4] = te_ms[None]
         return q
 
-    def log_factor(self, chi_pos, chi_neg, te_ms, conv):
+    def log_factor(self, chi_pos, chi_neg, te_ms, conv, mapping=None):
         """log of the intra-voxel factor, (n_vox, n_te): log|F| + i·(phase unwrapped along TE),
         interpolated multilinearly in the log-signal."""
-        return self._interp(conv, True)(self._q(chi_pos, chi_neg, te_ms))
+        return self._interp(conv, True)(self._q(chi_pos, chi_neg, te_ms, mapping))
 
-    def factor(self, chi_pos, chi_neg, te_ms, conv, interp="log"):
+    def factor(self, chi_pos, chi_neg, te_ms, conv, interp="log", mapping=None):
         """Complex intra-voxel factor (n_vox, n_te) for bulk χ+ >= 0, χ- <= 0. ``interp``:
         "log" (log-signal, the default) or "complex" (the complex signal)."""
-        q = self._q(chi_pos, chi_neg, te_ms)
+        q = self._q(chi_pos, chi_neg, te_ms, mapping)
         if interp == "log":
             return np.exp(self._interp(conv, True)(q))
         if interp == "complex":
             return self._interp(conv, False)(q)
         raise ValueError(f"interp must be 'log' or 'complex', got {interp!r}")
 
-    def unwrapped_phase(self, chi_pos, chi_neg, te_ms, conv, interp="log"):
+    def unwrapped_phase(self, chi_pos, chi_neg, te_ms, conv, interp="log", mapping=None):
         """Phase of the intra-voxel factor (n_vox, n_te), unwrapped along TE from 0. With
         ``interp="complex"`` the factor is evaluated on the LUT's TE grid up to the last echo
         and unwrapped there."""
         te_ms = np.atleast_1d(np.asarray(te_ms, float))
         if interp == "log":
-            return self.log_factor(chi_pos, chi_neg, te_ms, conv).imag
+            return self.log_factor(chi_pos, chi_neg, te_ms, conv, mapping).imag
         grid = np.union1d(self.te[self.te < te_ms.max()], te_ms)
-        F = self.factor(chi_pos, chi_neg, grid, conv, interp="complex")
+        F = self.factor(chi_pos, chi_neg, grid, conv, interp="complex", mapping=mapping)
         return np.unwrap(np.angle(F), axis=-1)[:, np.searchsorted(grid, te_ms)]
 
 
-def voxelwise_chi_echoes(lut: SphereLUT, chi_pos, chi_neg, te_ms, conv, interp="log"):
+def voxelwise_chi_echoes(lut: SphereLUT, chi_pos, chi_neg, te_ms, conv, interp="log", mapping=None):
     """The voxel-by-voxel per-echo χ(TE) = χ_bulk + φ_res(TE)/((2/3)γB0·TE), φ_res the intra-
     voxel phase unwrapped along TE. Kept for comparison only: it applies DECOMPOSE's own (2/3)
     conversion to its input, and no reconstruction produces it. :func:`star_chimap_echoes` is
     the shipped definition."""
     te_ms = np.atleast_1d(np.asarray(te_ms, float))
-    ph = lut.unwrapped_phase(chi_pos, chi_neg, te_ms, conv, interp)
+    ph = lut.unwrapped_phase(chi_pos, chi_neg, te_ms, conv, interp, mapping)
     bulk = (np.maximum(chi_pos, 0) + np.minimum(chi_neg, 0)).ravel()[:, None]
     return bulk + ph / ((2.0 / 3.0) * GAMMA * lut.b0 * 1e-6 * te_ms[None])
 
@@ -500,20 +603,60 @@ class SphereSignal:
     mixes branches; a linear blend of complex signals is the signal of a mixture of the node
     configurations and stays continuous. Static spheres are
     fully refocused by a spin echo, so the SE keeps the caller's exp(-TE·R2) (``se`` returns
-    None)."""
+    None). ``mapping`` (:class:`SourceMapping`, default ``highchi``) turns bulk χ± into sphere
+    parameters; ``source_flag`` holds its per-voxel flag on the brain voxels."""
 
-    def __init__(self, lut: SphereLUT, chi_pos, chi_neg, seg, B0, convention, interp="complex"):
+    def __init__(self, lut: SphereLUT, chi_pos, chi_neg, seg, B0, convention, interp="complex", mapping=None):
         if not np.isclose(B0, lut.b0):
             raise ValueError(f"the sphere LUT is built at {lut.b0} T, not {B0} T")
         if convention not in SPHERE_CONVENTIONS:
             raise ValueError(f"convention must be one of {SPHERE_CONVENTIONS}, got {convention!r}")
         self.lut, self.convention, self.interp = lut, convention, interp
+        self.mapping = mapping or HIGHCHI
+        lut.check_mapping(self.mapping)
         self.mask = np.isin(np.rint(np.asarray(seg)).astype(int), BRAIN_LABELS)
+        self.seg = np.rint(np.asarray(seg)).astype(int)[self.mask]
         self._cp = np.asarray(chi_pos, float)[self.mask]
         self._cn = np.asarray(chi_neg, float)[self.mask]
+        self.zeta_pos, self.zeta_neg, self.chi_s_pos, self.chi_s_neg, self.source_flag = \
+            lut.params(self._cp, self._cn, self.mapping)
 
     def intra_factor(self, TE_s):
-        return self.lut.factor(self._cp, self._cn, [TE_s * 1e3], self.convention, self.interp)[:, 0]
+        return self.lut.factor(self._cp, self._cn, [TE_s * 1e3], self.convention, self.interp,
+                               mapping=self.mapping)[:, 0]
+
+    def source_report(self, te_max_ms):
+        """What the mapping did, for the sidecar: the flagged share per brain label, the fractions
+        used, and the in-range check, the share of voxels whose source phase (2/3)γB0·χ_s·TE_max
+        exceeds π (χ_s above :func:`wrap_limit_ppm`), per sign."""
+        lim = float(wrap_limit_ppm(te_max_ms, self.lut.b0))
+        cap = self.mapping.chi_s_max or CHI_S_PAPER
+        need = (np.abs(self._cp) + np.abs(np.minimum(self._cn, 0))) / cap
+        zt = self.zeta_pos + self.zeta_neg
+
+        def stats(sel):
+            n = int(sel.sum())
+            if not n:
+                return {"n": 0}
+            sp, sm = self.chi_s_pos[sel] * (self.zeta_pos[sel] > 0), self.chi_s_neg[sel] * (self.zeta_neg[sel] > 0)
+            return {"n": n,
+                    "flag_above_cap": float(np.mean(self.source_flag[sel] == SRC_CHI_S_ABOVE_CAP)),
+                    "flag_clipped": float(np.mean(self.source_flag[sel] == SRC_CHI_S_CLIPPED)),
+                    "chi_s_pos_over_phase_limit": float(np.mean(sp > lim + 1e-12)),
+                    "chi_s_neg_over_phase_limit": float(np.mean(sm > lim + 1e-12)),
+                    "either_over_phase_limit": float(np.mean((sp > lim + 1e-12) | (sm > lim + 1e-12))),
+                    "zeta_needed_at_cap_median": float(np.median(need[sel])),
+                    "zeta_needed_at_cap_max": float(need[sel].max()),
+                    "zeta_total_median": float(np.median(zt[sel])), "zeta_total_max": float(zt[sel].max()),
+                    "chi_s_pos_max": float(sp.max()), "chi_s_neg_max": float(sm.max())}
+        out = {**self.mapping.describe(), "PhaseLimitPpm": lim, "Flags": "0 in range, 1 χ_s above the cap "
+               "(fraction cap binds / highchi χ_s > 0.15), 2 χ_s clipped at the LUT's last node",
+               "Brain": stats(np.ones(self.seg.shape, bool)), "ByLabel": {}}
+        for lab in BRAIN_LABELS:
+            sel = self.seg == lab
+            if sel.any():
+                out["ByLabel"][str(lab)] = stats(sel)
+        return out
 
     def gre(self, TE_s, R2):
         r2 = np.broadcast_to(np.asarray(R2, float), self.mask.shape)[self.mask]

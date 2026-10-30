@@ -42,8 +42,8 @@ def _meso_lut(path):
 def _sphere_lut(path, extra=0.002):
     """S = exp(i·c·(ζ+χs+ - ζ-χs- + extra)·TE) with c = (2/3)γB0 (decompose) and a pure decay
     for lorentz."""
-    z = np.array([0.0, 0.1, 0.2, 0.3, 0.35])
-    s = np.array([0.01, 0.05, 0.15, 0.3])
+    z = np.round(np.arange(0.0, 0.6001, 0.05), 2)
+    s = np.array([0.01, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75])
     te = np.arange(0, 50.0001, 0.5)
     c = (2 / 3) * meso.GAMMA * 3.0 * 1e-6
     ZP, ZM, SP, SM = np.meshgrid(z, z, s, s, indexing="ij")
@@ -166,6 +166,39 @@ class TestSpheres:
         assert np.all(z <= 0.35) and np.all(s >= 0.01)
         np.testing.assert_allclose(s[[1, 3]], [0.08, 0.15])
 
+    def test_source_params_inrange(self):
+        cap = 0.127
+        cp = np.array([0.0, 0.001, 0.02, 0.06, 0.07, 0.10, 0.20, 0.0])
+        cn = np.array([0.0, -0.001, -0.01, -0.01, -0.03, -0.04, -0.02, -0.09])
+        zp, zm, sp, sm, capped = meso.source_params_inrange(cp, cn, cap)
+        np.testing.assert_allclose(zp * sp * (zp > 0), cp, atol=1e-12)
+        np.testing.assert_allclose(zm * sm * (zm > 0), -cn, atol=1e-12)
+        need = (cp - cn) / cap
+        assert np.all(zp + zm <= 0.6 + 1e-12)
+        np.testing.assert_array_equal(capped, need > 0.6)
+        ok = ~capped
+        assert np.all(sp[ok] <= cap + 1e-12) and np.all(sm[ok] <= cap + 1e-12)
+        assert np.all(sp[capped & (cp > 0)] > cap) and np.all(sm[capped & (cn < 0)] > cap)
+        np.testing.assert_allclose([zp[2], zm[2]], [0.25, 0.25])          # low bulk: ζ_ref, as highchi
+        assert sp[3] == pytest.approx(cap) and 0.25 <= zp[3] + zm[3] <= 0.6  # χ+ at the cap, χ- gives way
+        m = meso.SourceMapping("in-range", cap)
+        flag = m(cp, cn, chi_s_lut_max=0.5)[-1]
+        np.testing.assert_array_equal(flag, np.where(capped, 1, 0))
+        assert m(np.array([0.5]), np.array([0.0]), chi_s_lut_max=0.75)[-1][0] == 2   # ζ 0.6, χ_s 0.83 > LUT
+        with pytest.raises(ValueError):
+            meso.SourceMapping("in-range")
+
+    def test_lut_coverage(self, tmp_path):
+        z = np.array([0.0, 0.1, 0.2, 0.3, 0.35])
+        s, te = np.array([0.01, 0.15]), np.array([0.0, 10.0])
+        S = np.ones((5, 5, 2, 2, 2), np.complex64)
+        p = str(tmp_path / "v1.npz")
+        np.savez(p, zeta=z, chi_s=s, te=te, b0=3.0, S_decompose=S, S_lorentz=S)
+        L = meso.SphereLUT(p)
+        L.check_mapping(meso.HIGHCHI)
+        with pytest.raises(ValueError, match="v2"):
+            L.check_mapping(meso.SourceMapping("in-range", 0.127))
+
     def test_voxelwise_chi_echoes_and_wrap_limit(self, luts):
         L = meso.SphereLUT(luts[1])
         cp, cn = np.array([0.02, 0.05]), np.array([-0.01, 0.0])
@@ -224,7 +257,8 @@ def _maps(tp, arrays, theta, cfg):
 
 class TestChisepIntegration:
     def test_presets_and_validation(self):
-        for name in ("meso-3t", "wm-micro-7t", "spheres-3t-paper", "spheres-3t-lorentz"):
+        for name in ("meso-3t", "wm-micro-7t", "spheres-3t-paper", "spheres-3t-lorentz",
+                     "spheres-3t-paper-highchi", "spheres-3t-lorentz-highchi"):
             cfg = chisep.PRESETS[name]
             assert cfg.r2prime_source == "fitted" and cfg.voxel == 1.0 and cfg.se and not cfg.anisotropic
         assert chisep.PRESETS["meso-3t"].signal_model == "mesoscopic"
@@ -233,11 +267,19 @@ class TestChisepIntegration:
         assert chisep.PRESETS["spheres-3t-paper"].sphere_convention == "decompose"
         assert chisep.PRESETS["spheres-3t-lorentz"].sphere_convention == "lorentz"
         assert chisep.PRESETS["spheres-3t-paper"].tr == pytest.approx(0.0593)
+        assert chisep.PRESETS["spheres-3t-paper"].sphere_source_range == "in-range"
+        assert chisep.PRESETS["spheres-3t-paper-highchi"].sphere_source_range == "highchi"
+        assert chisep.PRESETS["spheres-3t-lorentz-highchi"].sphere_convention == "lorentz"
+        m = chisep.sphere_mapping(chisep.PRESETS["spheres-3t-paper"])
+        assert m.kind == "in-range" and m.chi_s_max == pytest.approx(meso.wrap_limit_ppm(46.2))
+        assert chisep.sphere_mapping(chisep.PRESETS["spheres-3t-lorentz-highchi"]) is meso.HIGHCHI
         for bad in (dict(signal_model="mesoscopic"),                                   # relaxation ridani
                     dict(signal_model="spheres", relaxation="linear", dr=300, b0=7.0),
                     dict(relaxation="linear", dr=140, chimap_echoes=True),
                     dict(signal_model="mesoscopic", relaxation="linear", dr=140, meso_table="nope"),
-                    dict(signal_model="spheres", relaxation="linear", dr=300, b0=3.0, sphere_convention="nope")):
+                    dict(signal_model="spheres", relaxation="linear", dr=300, b0=3.0, sphere_convention="nope"),
+                    dict(signal_model="spheres", relaxation="linear", dr=300, b0=3.0, sphere_source_range="nope"),
+                    dict(signal_model="spheres", relaxation="linear", dr=300, b0=3.0, sphere_zeta_total_max=1.2)):
             with pytest.raises(ValueError):
                 chisep.ChisepConfig(**bad)
 
@@ -283,6 +325,13 @@ class TestChisepIntegration:
             np.testing.assert_allclose(ce, (gt + off)[..., None] * np.ones(3), atol=2e-4)
             meta = json.load(open(written["metadata"]))
             assert meta["SignalModel"]["Convention"] == "decompose"
+            src = meta["SignalModel"]["Sources"]
+            assert src["SourceRange"] == "in-range" and src["ChiSMaxPpm"] == pytest.approx(meso.wrap_limit_ppm(8.5))
+            flag = nib.load(written["sourcerange_mask"]).get_fdata()
+            assert flag.shape == gt.shape and set(np.unique(flag)) <= {0, 1, 2}
+            assert src["Brain"]["n"] == int(brain.sum())
+            # in range wherever the fraction cap does not bind: no source phase over π at TE_max
+            assert src["Brain"]["either_over_phase_limit"] <= src["Brain"]["flag_above_cap"] + src["Brain"]["flag_clipped"]
 
     def test_cli_preset(self):
         from unittest.mock import patch
