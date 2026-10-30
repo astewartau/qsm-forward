@@ -5,8 +5,11 @@ A voxel is modelled as a periodic box of tissue holding
 * myelinated axons: straight, parallel hollow cylinders along the box z axis with a
   radially anisotropic susceptibility tensor in the sheath (Wharton & Bowtell 2012),
   packed in 2D by random sequential addition;
-* iron clusters: randomly placed (Poisson, overlap allowed) uniformly magnetised
-  spheres of susceptibility ``dchi_fe`` (Yablonskiy & Haacke 1994).
+* iron: one or more populations of randomly placed (Poisson, overlap allowed)
+  uniformly magnetised spheres (Yablonskiy & Haacke 1994), each in its own periodic
+  box. The default mix is micron-scale clusters (static-to-intermediate regime, raise
+  R2') plus small "ferritin-scale" spheres in the motional-narrowing regime (raise R2,
+  hardly R2'), see build_lut.IRON.
 
 B0 makes angle ``theta`` with the fibres: b = (sin th, 0, cos th) in box coordinates.
 The microscopic field is computed with the Lorentz-corrected susceptibility-tensor
@@ -20,7 +23,7 @@ source amplitude and any B0 is a linear combination of a few theta-independent
 "basis" maps:
 
     myelin (z-invariant, kz = 0):  f = s^2 * M1 + M2
-    spheres:                       f = dchi * (s^2 Gxx + 2 s c Gxz + c^2 Gzz)
+    spheres (per population/level): f = dchi * (s^2 Gxx + 2 s c Gxz + c^2 Gzz)
 
 Water "walkers" record time integrals of the basis maps along their paths (static:
 path = fixed point; diffusion: Monte Carlo random walk with impermeable myelin
@@ -267,55 +270,69 @@ class Sampler3D:
 
 
 @dataclass
+class SpherePop:
+    """One population of iron spheres (all the same radius) in its own periodic box.
+
+    ``zeta`` holds the achieved volume fraction of each nested level (level k uses the
+    first N_k spheres); the sampler holds (Gxx, Gxz, Gzz) per level *increment*, so the
+    field at level k is the sum over increments <= k."""
+    name: str
+    radius: float
+    L: float
+    n: int
+    zeta: np.ndarray
+    sampler: Sampler3D
+
+
+@dataclass
 class Voxel:
     """A simulated tissue box with its basis maps."""
-    L: float
+    L: float                            # myelin box side
     packing: AxonPacking
     label2d: np.ndarray
     myelin2d: Sampler2D                 # maps (M1, M2), ppm per unit sheath scale
-    sphere3d: Sampler3D | None          # maps (Gxx,Gxz,Gzz) x n_levels, unit chi
-    sphere_levels: list = field(default_factory=list)   # zeta per nested level
+    pops: list = field(default_factory=list)   # SpherePop, in basis order
     chi_sheath_mean: float = 0.0        # tr/3 of sheath tensor (ppm)
-    Ls: float = 0.0                     # sphere / walker box side (= sphere_tile * L)
+    Ls: float = 0.0                     # walker box side (largest periodic box)
 
 
-def build_voxel(L, fvf, zetas, sphere_radius, n2d=4096, n3d=128, g=0.7,
-                chi_i=-0.12, chi_a=-0.10, rng=None, axon_kw=None, sphere_tile=1):
+def sphere_pop(name, radius, zetas, L, n, rng):
+    """Nested Poisson sphere sets at volume fractions ``zetas`` (increasing) in a
+    periodic box of side L on an n^3 grid. Returns a SpherePop."""
+    zetas = [z for z in zetas if z > 0]
+    vs = 4 / 3 * np.pi * radius ** 3
+    allc = place_spheres(L, max(zetas), radius, rng)
+    nk = [int(round(z * L ** 3 / vs)) for z in zetas]
+    maps, prev = [], 0
+    for k in nk:
+        S = raster_spheres(allc[prev:k], radius, L, n)
+        maps += sphere_basis(S, L)
+        prev = k
+    return SpherePop(name, radius, L, n, np.array(nk) * vs / L ** 3, Sampler3D(maps, L))
+
+
+def build_voxel(L, fvf, pops=(), n2d=4096, g=0.7, chi_i=-0.10, chi_a=-0.10, rng=None,
+                axon_kw=None, walker_box=None):
     """Build geometry + basis maps.
 
     Sheath tensor in the Wharton & Bowtell (2012) parameterisation,
     chi = chi_i*I + chi_a*diag(1, -1/2, -1/2) in (r, phi, z), so tr/3 = chi_i (the
     volume-averaged mean susceptibility of the sheath is chi_i).
 
-    ``zetas``: increasing list of sphere volume fractions; the sphere sets are nested
-    (level k uses the first N_k spheres), and basis maps are stored per *increment*
-    so that the cumulative field at level k is the sum over increments <= k.
-
-    ``sphere_tile`` (integer m): spheres live in a periodic box of side m*L on an
-    n3d^3 grid, with the myelin pattern tiled m x m times. This gives m^3 more iron
-    clusters per realisation (less configuration variance) at no myelin-grid cost."""
+    ``pops``: iron populations, each a dict(name, radius, zetas, L, n): nested sphere
+    levels at the given volume fractions in a periodic box of side L (n^3 grid). Boxes
+    are independent periodic patterns; a walker at r sees each pattern at r mod L.
+    Walkers live in a box of side ``walker_box`` (default: the largest box)."""
     rng = np.random.default_rng(rng)
     pk = pack_axons(L, fvf, g=g, rng=rng, **(axon_kw or {}))
     cxx, cxy, czz, lab = raster_axons(pk, n2d, chi_i - chi_a / 2, 1.5 * chi_a)
     M1, M2 = myelin_basis(cxx, cxy, czz, L)
     del cxx, cxy, czz
     s2d = Sampler2D([M1, M2], L)
-    s3d = None
-    zetas = [z for z in zetas if z > 0]
-    Ls = sphere_tile * L
-    if zetas:
-        allc = place_spheres(Ls, max(zetas), sphere_radius, rng)
-        nk = [int(round(z * Ls ** 3 / (4 / 3 * np.pi * sphere_radius ** 3))) for z in zetas]
-        maps = []
-        prev = 0
-        for k in nk:
-            S = raster_spheres(allc[prev:k], sphere_radius, Ls, n3d)
-            maps += sphere_basis(S, Ls)
-            prev = k
-        s3d = Sampler3D(maps, Ls)
-        del maps
-    chi_mean = chi_i   # tr/3 of the sheath tensor
-    return Voxel(L, pk, lab, s2d, s3d, zetas, chi_mean, Ls)
+    sp = [sphere_pop(p["name"], p["radius"], p["zetas"], p["L"], p["n"], rng)
+          for p in pops if any(z > 0 for z in p["zetas"])]
+    Ls = walker_box or max([L] + [p.L for p in sp])
+    return Voxel(L, pk, lab, s2d, sp, chi_i, Ls)
 
 
 def init_walkers(vox: Voxel, n_per_comp, rng=None):
@@ -340,10 +357,8 @@ def init_walkers(vox: Voxel, n_per_comp, rng=None):
 
 
 def _basis_values(vox, pos):
-    v = vox.myelin2d(pos[:, :2])
-    if vox.sphere3d is not None:
-        v = np.concatenate([v, vox.sphere3d(pos)], axis=1)
-    return v.astype(np.float64)
+    v = [vox.myelin2d(pos[:, :2])] + [p.sampler(pos) for p in vox.pops]
+    return np.concatenate(v, axis=1).astype(np.float64)
 
 
 def walk(vox: Voxel, pos, comp, t_out, D=0.0, dt=2e-3, rng=None, progress=False):
@@ -386,17 +401,17 @@ def walk(vox: Voxel, pos, comp, t_out, D=0.0, dt=2e-3, rng=None, progress=False)
     return out
 
 
-def phase_coeffs(vox: Voxel, theta, level=None, dchi_fe=0.0, sheath_scale=1.0):
+def phase_coeffs(vox: Voxel, theta, sheath_scale=1.0, iron=None):
     """Coefficient vector c such that field (ppm) = basis . c, for fibre-to-B0 angle
-    theta, sheath susceptibility scale and iron level (index into vox.sphere_levels,
-    None = no iron)."""
+    theta and sheath susceptibility scale. ``iron``: {pop name: (level, dchi)} with
+    level an index into that population's nested levels (None/absent = no iron)."""
     s, c = np.sin(theta), np.cos(theta)
     coef = [sheath_scale * s * s, sheath_scale]
-    if vox.sphere3d is not None:
-        nl = len(vox.sphere_levels)
-        for k in range(nl):
-            on = level is not None and k <= level
-            w = dchi_fe if on else 0.0
+    iron = iron or {}
+    for p in vox.pops:
+        level, dchi = iron.get(p.name, (None, 0.0))
+        for k in range(len(p.zeta)):
+            w = dchi if (level is not None and k <= level) else 0.0
             coef += [w * s * s, w * 2 * s * c, w * c * c]
     return np.array(coef)
 
@@ -466,3 +481,25 @@ def yh_r2p_sphere(zeta, dchi_ppm, B0):
 def yh_r2p_cylinder(zeta, dchi_ppm, B0, theta):
     """Y&H static-dephasing R2' for parallel cylinders (1/ms): zeta*dw_c."""
     return zeta * dw_cylinder(dchi_ppm, B0, theta)
+
+
+def mn_r2_sphere(zeta, dchi_ppm, B0, radius, D):
+    """Motional-narrowing R2 (1/ms) of permeable spheres, alpha = dw R^2/D << 1:
+    (16/45) zeta dw^2 R^2/D with dw = gamma dchi B0/3 (Brooks et al. 2001; Jensen &
+    Chandra 2000). Here R2* = R2 (Hahn echo) and R2' -> 0."""
+    return 16 / 45 * zeta * dw_sphere(dchi_ppm, B0) ** 2 * radius ** 2 / D
+
+
+# Protocol used to define "emergent" rates: mono-exponential log-linear fits of the
+# GRE magnitude and of Hahn spin echoes, R2' = R2*(GRE) - R2(SE).
+PROTOCOL_3T = dict(gre_ms=np.arange(5.0, 40.01, 5.0), se_ms=np.arange(10.0, 40.01, 10.0))
+
+
+def fit_rate(t_ms, S):
+    """Mono-exponential rate (1/s) from a log-linear least-squares fit of |S| along
+    axis 0 (t in ms)."""
+    t = np.asarray(t_ms, float)
+    y = np.log(np.maximum(np.abs(S), 1e-30))
+    tc = t - t.mean()
+    tc = tc.reshape((-1,) + (1,) * (y.ndim - 1))
+    return -(y * tc).sum(0) / (tc ** 2).sum() * 1e3
