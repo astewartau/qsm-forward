@@ -114,9 +114,12 @@ class MesoLUT:
 
     def compartment_signals(self, chi_pos, chi_neg, theta_rad, B0, TE_ms, se=False,
                             powder=False):
-        """Per-compartment complex signals (3, n_vox) at one TE (ms). ``powder``:
-        orientation-dispersed fibres (log-average over a uniform sphere of theta),
-        appropriate for grey matter / no V1."""
+        """Per-compartment complex signals (3, n_vox) at one TE (ms).
+
+        ``powder``: fibres uniformly distributed over orientation within the voxel (grey
+        matter, no V1). The voxel signal is then the solid-angle-weighted *linear*
+        average of the complex signal over theta (each fibre population contributes its
+        own water; no exchange between populations)."""
         cp, cn, th = self._prep(chi_pos, chi_neg, theta_rad if not powder else np.zeros(np.size(chi_pos)))
         ib = self._ib(B0)
         arr, tg = (self._ls, self.TE_SE) if se else (self._lg, self.TE)
@@ -125,16 +128,21 @@ class MesoLUT:
             if not powder:
                 out.append(self._interp(arr, tg, ib, ci, cp, cn, th, TE_ms))
             else:
-                ths = self.theta
-                w = np.sin(np.deg2rad(ths))
-                w = w / w.sum()
                 acc = 0
-                for tk, wk in zip(ths, w):
-                    acc = acc + wk * np.log(self._interp(arr, tg, ib, ci, cp, cn,
-                                                         np.full_like(cp, tk), TE_ms))
-                out.append(np.exp(acc))
+                for tk, wk in zip(self.theta, self.powder_weights()):
+                    acc = acc + wk * self._interp(arr, tg, ib, ci, cp, cn,
+                                                  np.full_like(cp, tk), TE_ms)
+                out.append(acc)
         shape = np.shape(chi_pos)
         return np.stack(out).reshape((3,) + shape)
+
+    def powder_weights(self):
+        """Solid-angle weights of the theta nodes (cos of the bin edges, half bins at
+        0 and 90 deg) for a uniform orientation distribution."""
+        t = np.deg2rad(self.theta)
+        edges = np.concatenate([[t[0]], 0.5 * (t[1:] + t[:-1]), [t[-1]]])
+        w = np.cos(edges[:-1]) - np.cos(edges[1:])
+        return w / w.sum()
 
     def weights(self, chi_neg, rho=(1.0, 0.5, 1.0)):
         cn = np.clip(np.abs(np.minimum(np.asarray(chi_neg, float), 0)), self._neg_axis[0],
@@ -170,3 +178,30 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.cmd == "merge":
         merge(a.parts, a.mode, a.out)
+
+
+# ----------------------------------------------------------------------------------
+# chi- ground truth
+# ----------------------------------------------------------------------------------
+def chi_neg_ground_truth(chi_neg):
+    """Scored chi- (orientation independent): mean sheath susceptibility (tr/3 of the
+    sheath tensor, i.e. chi_I x sheath scale) x myelin volume fraction. This is the LUT's
+    chi- axis value itself, so the scored map is the input chi- map."""
+    return np.minimum(np.asarray(chi_neg, float), 0.0)
+
+
+def chi_neg_apparent(chi_neg, theta_rad, chi_i=-0.10, chi_a=-0.10, powder=False):
+    """Secondary, orientation-dependent apparent chi- (what a scalar dipole inversion of
+    the voxel-mean susceptibility tensor reports): chi_bar + dchi_bulk (cos^2 th - 1/3).
+
+    For the radially anisotropic sheath chi_I I + chi_A diag(1, -1/2, -1/2) in
+    (r, phi, z), the azimuthal average is chi_I + chi_A diag(1/4, 1/4, -1/2) in (x, y, z),
+    so the bulk anisotropy is chi_par - chi_perp = -(3/4) chi_A x (sheath scale x MVF)
+    = -(3/4) (chi_A/chi_I) chi-. Powder (grey matter): the cos^2 term averages to 1/3,
+    so the apparent value equals the ground truth. Microstructural (hollow-cylinder)
+    frequency offsets are not included: they are not susceptibility."""
+    cn = chi_neg_ground_truth(chi_neg)
+    if powder:
+        return cn
+    c2 = np.cos(np.asarray(theta_rad, float)) ** 2
+    return cn * (1 - 0.75 * (chi_a / chi_i) * (c2 - 1 / 3))
