@@ -6,6 +6,7 @@ from .qsm_forward import (
     generate_slice_phase_offsets,
     generate_susceptibility_phantom, generate_chisep_phantom,
     generate_chisep_maps, generate_r2prime, CHISEP_TISSUE_PARAMS, DR_KERNEL,
+    MonoExponentialRateFit, fit_r2prime,
     get_version,
     generate_t2_map, generate_dr_maps, generate_dr_maps_ridani, scale_maps_to_3t,
     apply_wm_anisotropy,
@@ -23,6 +24,7 @@ __all__ = [
     'generate_slice_phase_offsets',
     'generate_susceptibility_phantom', 'generate_chisep_phantom',
     'generate_chisep_maps', 'generate_r2prime', 'CHISEP_TISSUE_PARAMS', 'DR_KERNEL',
+    'MonoExponentialRateFit', 'fit_r2prime',
     'get_version',
     'generate_t2_map', 'generate_dr_maps', 'generate_dr_maps_ridani', 'scale_maps_to_3t',
     'apply_wm_anisotropy',
@@ -33,3 +35,5 @@ __all__ = [
     'hc_mwf_from_myelin_content',
     'WM_HC_PARAMS', 'GAMMA_BAR_HC',
 ]
+
+from . import chisep  # noqa: E402  (named chi-separation phantoms; imports the names above)
