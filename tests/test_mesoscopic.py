@@ -136,6 +136,26 @@ class TestMesoLUT:
         assert mask.sum() == 7 and g.shape == (7,)
         # GRE rate = intrinsic (20 - 1) + iron 14 at χ+ = 0.1
         np.testing.assert_allclose(np.abs(g), np.exp(-0.02 * (19.0 + 14.0)), rtol=1e-5)
+        assert sig.floored_fraction == 0.0
+
+    def test_intrinsic_r2_floor(self, luts):
+        L = meso.MesoLUT(luts[0])
+        shape = (2, 2, 2)
+        seg = np.full(shape, 9)
+        seg[0] = 2
+        cp = np.full(shape, 0.1)                                   # LUT SE loss 1 1/s
+        sig = meso.MesoscopicSignal(L, cp, np.zeros(shape), np.full(shape, np.nan), seg, 3.0,
+                                    se_tes_ms=(10, 30, 50, 70))
+        assert sig.r2_floor == pytest.approx(meso.free_water_r2(3.0)) == pytest.approx(0.65 / 1.0296)
+        assert meso.free_water_r2(7.0) == pytest.approx(1 / 1.0296)
+        R2 = np.where(seg == 2, 1.2, 20.0)                          # pallidus: 1.2 - 1 < floor
+        sig.se(0.01, R2)
+        rep = sig.floor_report(seg)
+        assert rep["ByLabel"]["2"]["floored"] == 4 and rep["ByLabel"]["9"]["floored"] == 0
+        np.testing.assert_allclose(rep["ByLabel"]["2"]["median_se_r2_excess_floored"],
+                                   sig.r2_floor + 1.0 - 1.2, atol=1e-6)
+        assert rep["UnflooredResidualAbove0p1"] == 0 and rep["UnflooredResidualP99"] < 1e-6
+        assert rep["FlooredFraction"] == 0.5
 
 
 class TestSpheres:
@@ -163,21 +183,28 @@ class TestSpheres:
         field, gt = rng.normal(0, 0.05, shape), rng.normal(0, 0.05, shape)
         te = np.array([5.0, 10.0, 20.0])
         # linear phase: every echo reconstructs the same χ, chimap-echoes = ground truth
-        ph = meso.echo_local_phases(field, te, 3.0)
-        out = meso.star_chimap_echoes(gt, ph, mask, te, 3.0, (1, 1, 1), FakeTools(), unwrap="exact")
+        ref = meso.echo_local_phases(field, te, 3.0)
+        out = meso.star_chimap_echoes(gt, ref, ref, mask, te, 3.0, (1, 1, 1), FakeTools(), unwrap="exact")
         np.testing.assert_allclose(out[:, mask], np.broadcast_to(gt[mask], (3, mask.sum())), atol=1e-12)
         assert np.all(out[:, ~mask] == 0)
-        # an echo-dependent intra-voxel phase shows up as the per-echo minus combined difference
+
+        class BiasedTools(FakeTools):                               # STAR's own echo dependence
+            def star(self, phase, mask, te_ms, b0, voxel):
+                return super().star(phase, mask, te_ms, b0, voxel) * (1 + 1.0 / te_ms)
+
+        # an echo-dependent intra-voxel phase shows up as the per-echo minus reference difference,
+        # and a reconstruction bias common to both cancels to first order
         pattern = rng.uniform(0, 1, shape)
         intra = np.stack([0.1 * t ** 2 / 100 * pattern for t in te])
         ph = meso.echo_local_phases(field, te, 3.0, intra)
-        out, se, sc = meso.star_chimap_echoes(gt, ph, mask, te, 3.0, (1, 1, 1), FakeTools(),
-                                              unwrap="exact", return_parts=True)
         c = 2 * np.pi * 42.58 * 3.0 * 1e-3
         p = pattern[mask] - pattern[mask].mean()                    # the mask mean is removed
         per = 0.1 * te[:, None] / 100 * p / c
-        comb = (0.1 * te ** 2 / 100).sum() * p / (c * te.sum())
-        np.testing.assert_allclose(out[:, mask] - gt[mask], per - comb, atol=1e-12)
+        out, se, sr = meso.star_chimap_echoes(gt, ph, ref, mask, te, 3.0, (1, 1, 1), FakeTools(),
+                                              unwrap="exact", return_parts=True)
+        np.testing.assert_allclose(out[:, mask] - gt[mask], per, atol=1e-12)
+        out = meso.star_chimap_echoes(gt, ph, ref, mask, te, 3.0, (1, 1, 1), BiasedTools(), unwrap="exact")
+        np.testing.assert_allclose(out[:, mask] - gt[mask], per * (1 + 1.0 / te[:, None]), atol=1e-12)
 
 
 def _tiny(tmp):
@@ -241,13 +268,19 @@ class TestChisepIntegration:
             FakeTools.calls = 0
             written = chisep.generate_chisep_bids(tmp, os.path.join(tmp, "bids"), cfg,
                                                   maps=_maps(tp, arrays, theta, cfg))
-            assert FakeTools.calls == 4                                   # 3 echoes + combined
+            assert FakeTools.calls == 6                                   # 3 echoes + 3 references
             ce = nib.load(written["chimap_echoes"]).get_fdata()
             gt = nib.load(written["chimap_echoes"].replace("_Chimap-echoes", "_Chimap")).get_fdata()
             assert ce.shape == gt.shape + (3,)
-            # the synthetic table's phase is linear in TE: no echo dependence (up to the complex
-            # interpolation between nodes)
-            np.testing.assert_allclose(ce, np.broadcast_to(gt[..., None], ce.shape), atol=1e-4)
+            # the synthetic table's intra-voxel phase is linear in TE, c·(bulk + 0.002)·TE with
+            # c = (2/3)γB0: per-echo STAR minus the linear-phase reference gives the TE-independent
+            # χ offset (2/3)(bulk + 0.002), mask mean removed (up to the complex interpolation)
+            mask = nib.load(written["chimap_echoes"].replace("_Chimap-echoes", "_mask")).get_fdata() > 0.5
+            brain = np.isin(arrays["seg"], meso.BRAIN_LABELS)
+            off = np.where(brain, (2 / 3) * (np.maximum(arrays["chi_pos"], 0) + np.minimum(arrays["chi_neg"], 0)
+                                             + 0.002), 0.0)
+            off = np.where(mask, off - off[mask].mean(), 0.0)
+            np.testing.assert_allclose(ce, (gt + off)[..., None] * np.ones(3), atol=2e-4)
             meta = json.load(open(written["metadata"]))
             assert meta["SignalModel"]["Convention"] == "decompose"
 

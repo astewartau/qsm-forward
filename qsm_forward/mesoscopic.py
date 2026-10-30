@@ -272,6 +272,16 @@ class MesoLUT:
                     R2_per_ppm=(r2 / cp).tolist(), R2star_per_ppm=(r2s / cp).tolist())
 
 
+def free_water_r2(B0):
+    """The head model's CSF R2 (1/s) at ``B0``: 1/T2 of label 10 in
+    ``qsm_forward.T2_TISSUE_PARAMS_7T`` (1029.6 ms at 7 T), scaled by 0.65 at 3 T as
+    :func:`qsm_forward.qsm_forward.generate_t2_map` does: 0.97 at 7 T, 0.63 at 3 T. The floor of
+    the intrinsic water R2 of the mesoscopic model."""
+    from .qsm_forward import T2_TISSUE_PARAMS_7T
+    r2 = 1000.0 / T2_TISSUE_PARAMS_7T[10]
+    return r2 * 0.65 if float(B0) == 3.0 else r2
+
+
 class MesoscopicSignal:
     """Per-voxel complex GRE and SE factors of the ``mesoscopic`` model on a simulation grid.
 
@@ -283,11 +293,12 @@ class MesoscopicSignal:
     its own model elsewhere."""
 
     def __init__(self, lut: MesoLUT, chi_pos, chi_neg, theta_deg, seg, B0,
-                 se_tes_ms=PROTOCOL_3T["se_ms"], r2_floor=1.0):
+                 se_tes_ms=PROTOCOL_3T["se_ms"], r2_floor=None, r2_iterations=4, r2_tol=0.01):
         self.lut = lut
         self.B0 = float(B0)
         self.se_tes_ms = np.asarray(se_tes_ms, float)
-        self.r2_floor = float(r2_floor)
+        self.r2_floor = free_water_r2(self.B0) if r2_floor is None else float(r2_floor)
+        self.r2_iterations, self.r2_tol = int(r2_iterations), float(r2_tol)
         self._r2_key = None
         lut._ib(self.B0)
         seg = np.rint(np.asarray(seg)).astype(int)
@@ -302,22 +313,64 @@ class MesoscopicSignal:
 
     def intrinsic_r2(self, R2):
         """Intrinsic R2 (1/s) of the extra-axonal and axonal water, per brain voxel, such that the
-        simulated spin echo reproduces the tissue R2 map: the tissue map is what a spin-echo
-        measurement gives, and part of it is the LUT's own irreversible loss (iron in the
-        motional-narrowing regime, the fast myelin-water pool). One correction step: evaluate the
-        SE over ``se_tes_ms`` at R2_0 = R2_tissue, fit its rate, subtract the excess; floored at
-        ``r2_floor``. ``floored_fraction`` records how often the floor applied."""
+        simulated spin echo reproduces the tissue R2 map.
+
+        The tissue map is the head model's spin-echo R2: it already contains the irreversible loss
+        the LUT adds on its own (iron in the motional-narrowing regime, the fast myelin-water pool).
+        Giving the water the full tissue R2 would count that loss twice, so the water's (non-iron)
+        R2 is the tissue R2 minus the LUT's excess: R2_0 <- R2_0 - [R2_SE(R2_0) - R2_tissue], with
+        R2_SE the mono-exponential rate of the simulated SE over ``se_tes_ms``, iterated from
+        R2_0 = R2_tissue (``r2_iterations`` steps at most, until the largest residual among the
+        unfloored voxels is below ``r2_tol``).
+
+        R2_0 is floored at ``r2_floor``: by default the head model's CSF R2 at this field
+        (:func:`free_water_r2`), as no tissue water relaxes more slowly than free water. Where the
+        floor binds, the LUT's own SE loss alone exceeds the tissue map (the iron nuclei: the
+        tabulated iron R2 per ppm is larger than the head model leaves room for), and the simulated
+        SE R2 stays above the map there. ``floored`` (brain voxels) and ``se_r2_residual`` (simulated
+        SE R2 - tissue R2, 1/s) record where and by how much; ``floored_fraction`` is their share."""
         key = id(R2)
         if self._r2_key == key:
             return self._r2_0
         r2 = np.broadcast_to(np.asarray(R2, float), self.mask.shape)[self.mask].astype(float)
-        se = np.array([np.abs(self._eval(t, r2, se=True, r2_0=r2)) for t in self.se_tes_ms])
-        excess = fit_rate(self.se_tes_ms, se) - r2
-        r2_0 = r2 - excess
-        self.floored_fraction = float(np.mean(r2_0 < self.r2_floor)) if r2_0.size else 0.0
-        self._r2_0 = np.maximum(r2_0, self.r2_floor)
+        r2_0 = np.maximum(r2, self.r2_floor)
+        for _ in range(max(self.r2_iterations, 1)):
+            resid = self._se_rate(r2_0) - r2
+            free = r2_0 - resid >= self.r2_floor
+            r2_0 = np.maximum(r2_0 - resid, self.r2_floor)
+            if not free.any() or np.abs(resid[free]).max() < self.r2_tol:
+                break
+        self.se_r2_residual = self._se_rate(r2_0) - r2
+        self.floored = r2_0 <= self.r2_floor
+        self.floored_fraction = float(np.mean(self.floored)) if r2_0.size else 0.0
+        self._r2_0 = r2_0
         self._r2_key = key
         return self._r2_0
+
+    def _se_rate(self, r2_0):
+        se = np.array([np.abs(self._eval(t, None, se=True, r2_0=r2_0)) for t in self.se_tes_ms])
+        return fit_rate(self.se_tes_ms, se)
+
+    def floor_report(self, seg):
+        """Where the intrinsic-R2 floor binds, per brain label: voxel count, fraction, and the median
+        simulated SE R2 minus the tissue R2 map there (1/s). Call after the signal was simulated."""
+        lab = np.rint(np.asarray(seg)).astype(int)[self.mask]
+        free = np.abs(self.se_r2_residual[~self.floored])
+        out = {"FloorPerSecond": self.r2_floor, "FlooredFraction": self.floored_fraction,
+               # unfloored voxels whose SE R2 still misses the map by > 0.1 1/s: R2 maps so high
+               # (> ~100 1/s, head-model outliers) that the SE over se_tes_ms has decayed away
+               "UnflooredResidualAbove0p1": int(np.sum(free > 0.1)),
+               "UnflooredResidualP99": float(np.percentile(free, 99)) if free.size else 0.0,
+               "ByLabel": {}}
+        for k in BRAIN_LABELS:
+            m = lab == k
+            if not m.any():
+                continue
+            f = m & self.floored
+            out["ByLabel"][str(k)] = {
+                "n": int(m.sum()), "floored": int(f.sum()), "fraction": float(f.sum() / m.sum()),
+                "median_se_r2_excess_floored": float(np.median(self.se_r2_residual[f])) if f.any() else 0.0}
+        return out
 
     def _eval(self, TE_ms, R2, se, r2_0=None):
         r2 = self.intrinsic_r2(R2) if r2_0 is None else r2_0
@@ -541,31 +594,39 @@ def echo_local_phases(local_field_ppm, te_ms, b0, intra_phase=None):
     return out
 
 
-def star_chimap_echoes(chi_gt, local_phases, mask, te_ms, b0, voxel, tools,
+def star_chimap_echoes(chi_gt, local_phases, ref_phases, mask, te_ms, b0, voxel, tools,
                        unwrap="laplacian", return_parts=False):
-    """chimap-echoes = χ_GT + [STAR(echo i) - STAR(echo-combined)], in ``mask``.
+    """chimap-echoes = χ_GT + [STAR(echo i) - STAR_ref(echo i)], in ``mask``.
 
-    Each echo's local phase (as acquired: wrapped, then Laplacian-unwrapped with STI's
-    MRPhaseUnwrap settings, after Chen et al. 2021 §3.6; or, with ``unwrap="exact"``, the true
-    phase unwrapped along TE) has its mask mean removed (the constant a background-field removal
-    takes out) and goes through STAR-QSM at its own TE. The combined reconstruction is STAR on the
-    sum of the echoes' unwrapped phases with TE = ΣTE, as STI Suite's GUI combines echoes. The
-    bulk part stays the ground truth; only the echo dependence comes from the reconstruction.
+    ``local_phases`` are the echoes' local phases with the intra-voxel phase, ``ref_phases`` the
+    reference: the same echoes with a perfectly linear phase (the ground-truth macroscopic local
+    field × TE, :func:`echo_local_phases` without ``intra_phase``). STAR-QSM reads only the phase,
+    so the reference shares the magnitude by construction. Both go through the identical
+    processing, echo by echo: wrapped, then Laplacian-unwrapped with STI's MRPhaseUnwrap settings
+    (after Chen et al. 2021 §3.6; or, with ``unwrap="exact"``, used as given, unwrapped along TE),
+    mask mean removed (the constant a background-field removal takes out), and STAR-QSM at the
+    echo's TE. The difference keeps only the echo dependence the tissue's intra-voxel phase causes
+    as seen through that processing: STAR's own echo dependence (it returns χ 20-40 % high at
+    2.7 ms on a linear phase, falling to the ground truth by about 15-20 ms) is in both terms and
+    cancels, and with no intra-voxel phase the output is the ground truth at every echo.
     ``tools`` provides ``unwrap(phases, mask, voxel)`` and ``star(phase, mask, te_ms, b0, voxel)``
-    (:class:`QsmrsTools`)."""
+    (:class:`QsmrsTools`). ``return_parts`` also returns STAR(echo i) and STAR_ref(echo i)."""
     te_ms = np.atleast_1d(np.asarray(te_ms, float))
     mask = np.asarray(mask, bool)
-    if unwrap == "laplacian":
-        wrapped = [np.angle(np.exp(1j * p)) * mask for p in local_phases]
-        phases = tools.unwrap(wrapped, mask, voxel)
-    elif unwrap == "exact":
-        phases = [np.asarray(p, float) for p in local_phases]
-    else:
-        raise ValueError(f"unwrap must be 'laplacian' or 'exact', got {unwrap!r}")
-    phases = [np.where(mask, p - p[mask].mean(), 0.0) for p in phases]
-    star_e = np.stack([tools.star(p, mask, te, b0, voxel) for p, te in zip(phases, te_ms)])
-    star_c = tools.star(np.sum(phases, axis=0), mask, te_ms.sum(), b0, voxel)
-    out = np.where(mask[None], np.asarray(chi_gt, float)[None] + star_e - star_c[None], 0.0)
+
+    def process(local):
+        if unwrap == "laplacian":
+            phases = tools.unwrap([np.angle(np.exp(1j * p)) * mask for p in local], mask, voxel)
+        elif unwrap == "exact":
+            phases = [np.asarray(p, float) for p in local]
+        else:
+            raise ValueError(f"unwrap must be 'laplacian' or 'exact', got {unwrap!r}")
+        phases = [np.where(mask, p - p[mask].mean(), 0.0) for p in phases]
+        return np.stack([tools.star(p, mask, te, b0, voxel) for p, te in zip(phases, te_ms)])
+
+    star_e = process(local_phases)
+    star_r = process(ref_phases)
+    out = np.where(mask[None], np.asarray(chi_gt, float)[None] + star_e - star_r, 0.0)
     if return_parts:
-        return out, star_e, star_c
+        return out, star_e, star_r
     return out

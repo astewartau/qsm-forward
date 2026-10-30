@@ -34,16 +34,30 @@ Signal models (``signal_model``):
                    with the Wharton & Bowtell sheath tensor and iron as sphere populations,
                    diffusion Monte Carlo (``meso_table="diffusion"``, default) or static
                    dephasing (``"static"``). White matter uses its fibre angle, other tissue the
-                   orientation average. χ- is the input map as the orientation-independent
-                   sheath χ·MVF (scored); the field follows the apparent χ- (the voxel-mean
-                   sheath tensor projected on B0), written as ``*_desc-apparent_Chimap-neg``.
+                   orientation average. Two χ- maps, on purpose:
+                     ``*_Chimap-neg``  the input map as the orientation-independent sheath
+                                       χ·MVF: the ground truth χ- is scored against.
+                     ``*_desc-apparent_Chimap-neg``  the voxel-mean sheath tensor projected on
+                                       B0 (equal to the above outside white matter; in white
+                                       matter |apparent| ≈ 0.6·|χ-| at θ < 30°).
+                   The field is computed from χ+ + apparent χ-, and ``*_Chimap`` (the χ input
+                   every method gets) is that same total, so field and χ input agree with each
+                   other and with the signal; consequently χ+ + χ- (scored) differs from
+                   ``*_Chimap`` in white matter by the anisotropy. The extra-/intra-axonal
+                   water's intrinsic R2 is the tissue R2 map minus the LUT's own spin-echo loss
+                   (iron, myelin water), floored at the head model's CSF R2, so the simulated SE
+                   reproduces ``*_R2map`` except where the floor binds (sidecar
+                   ``SignalModel.IntrinsicR2``, ``*_desc-r2floor_mask``).
   spheres          brain voxels get the signal of water-containing para- and diamagnetic
                    spheres (Chen et al. 2021's simulation [7]), static dephasing, 3 T, with the
                    intra-source convention ``sphere_convention`` ("decompose": water inside a
                    source precesses at (2/3)χγB0; "lorentz": Lorentz-corrected). With
                    ``chimap_echoes`` the per-echo χ(TE) input of DECOMPOSE-QSM is written as
-                   ``*_Chimap-echoes.nii``: the ground-truth χ plus the echo dependence of a
-                   per-echo STAR-QSM reconstruction of the noiseless signal
+                   ``*_Chimap-echoes.nii``: the ground-truth χ plus [STAR(echo i) -
+                   STAR_ref(echo i)], per-echo STAR-QSM of the noiseless local phase minus the
+                   same reconstruction of a perfectly linear phase (ground-truth field × TE),
+                   so STAR's own echo dependence cancels and only the tissue's remains (zero
+                   for a linear phase; ≈ 0 with the Lorentz convention)
                    (:func:`qsm_forward.mesoscopic.star_chimap_echoes`).
   Both need ``relaxation="linear"``: its ``dr`` is the nominal relaxivity recorded in the
   sidecar, used outside the brain labels and for the ``*_desc-formula_R2prime`` reference; the
@@ -486,11 +500,16 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         meta["SignalModel"] = {
             "Model": "mesoscopic", "Table": lut.mode, "LUT": os.path.basename(lut.path),
             "LUTParameters": lut.params, "IronRelaxivity": lut.iron_relaxivity(config.b0),
-            "IntrinsicR2FlooredFraction": getattr(factor, "floored_fraction", None),
+            "IntrinsicR2": factor.floor_report(seg_sim),
             "ChiNeg": "scored: orientation-independent sheath χ·MVF (= input map); "
                       "desc-apparent: voxel-mean sheath tensor projected on B0 (drives the field)",
-            "Chimap": "χ+ + apparent χ-",
+            "Chimap": "χ+ + apparent χ-: the total the simulated field is computed from",
         }
+        floor = np.zeros(factor.mask.shape, np.uint8)
+        floor[factor.mask] = factor.floored
+        out = os.path.join(anat, f"{stem}_desc-r2floor_mask.nii")
+        nib.save(nib.Nifti1Image(floor, ref_nii.affine, ref_nii.header), out)
+        written["r2floor_mask"] = out
     elif config.signal_model == "spheres":
         meta["SignalModel"] = {"Model": "spheres", "Convention": config.sphere_convention,
                                "LUT": os.path.basename(lut.path),
@@ -498,9 +517,11 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         if config.chimap_echoes:
             written["chimap_echoes"] = write_chimap_echoes(anat, stem, config, factor)
             meta["SignalModel"]["ChimapEchoes"] = (
-                "χ_GT + [STAR(echo i) - STAR(echo-combined)]: per-echo STAR-QSM (QSM.rs, exact port of "
+                "χ_GT + [STAR(echo i) - STAR_ref(echo i)]: per-echo STAR-QSM (QSM.rs, exact port of "
                 "STI Suite 3.0 QSM_star) of the noiseless local phase, Laplacian-unwrapped (STI "
-                "MRPhaseUnwrap settings), mask mean removed; combined = STAR of the summed phases at ΣTE")
+                "MRPhaseUnwrap settings), mask mean removed; STAR_ref = the same processing of a "
+                "perfectly linear phase (ground-truth local field × TE), so STAR's own echo "
+                "dependence cancels and only the tissue's remains")
     out = os.path.join(anat, f"{stem}_chisep.json")
     with open(out, "w") as f:
         json.dump(meta, f, indent=2)
@@ -531,8 +552,10 @@ def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, un
     ph = factor.lut.unwrapped_phase(factor._cp, factor._cn, tes, factor.convention, factor.interp)
     intra[:, factor.mask] = ph.T
     phases = mesoscopic.echo_local_phases(local, tes, config.b0, intra)
+    ref_phases = mesoscopic.echo_local_phases(local, tes, config.b0)
     voxel = np.asarray(ref.header.get_zooms()[:3], float)
-    chi_e = mesoscopic.star_chimap_echoes(chi_gt, phases, mask, tes, config.b0, voxel, tools, unwrap=unwrap)
+    chi_e = mesoscopic.star_chimap_echoes(chi_gt, phases, ref_phases, mask, tes, config.b0, voxel, tools,
+                                          unwrap=unwrap)
     out = os.path.join(anat, f"{stem}_Chimap-echoes.nii")
     nib.save(nib.Nifti1Image(np.moveaxis(chi_e, 0, -1).astype(np.float32), ref.affine), out)
     return out
