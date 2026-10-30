@@ -82,7 +82,7 @@ def source_params(chi_bulk):
     b = np.abs(np.asarray(chi_bulk, float))
     chi_s = np.clip(b / ZETA_REF, CHI_S_MIN, CHI_S_PAPER)
     chi_s = np.where(b > ZETA_MAX * CHI_S_PAPER, b / ZETA_MAX, chi_s)
-    zeta = np.where(chi_s > 0, b / chi_s, 0.0)
+    zeta = np.minimum(b / chi_s, ZETA_MAX)   # chi_s >= 0.01 > 0; min() only absorbs rounding
     return zeta, chi_s
 
 
@@ -397,7 +397,7 @@ def head(lut_path, outdir, slice_only=False, chunk=200000):
     cpi = nib.load(f"{CHI}/Chi_positive.nii.gz")
     cp = cpi.get_fdata()
     cn = nib.load(f"{CHI}/Chi_negative.nii.gz").get_fdata()
-    m = (seg > 0) & (seg != 10) & (seg != 11)      # brain tissue (CSF, blood: no sources here)
+    m = (seg >= 1) & (seg <= 9)      # brain tissue labels (CSF, vessels, non-brain: no sources)
     if slice_only:
         keep = np.zeros_like(m)
         keep[:, :, seg.shape[2] // 2] = True
