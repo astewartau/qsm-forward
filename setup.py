@@ -15,8 +15,11 @@ setup(
     long_description_content_type='text/markdown',
     install_requires=[
         'numpy',
+        'scipy',
+        'nibabel',
         'nilearn',
-        'dipy'
+        'dipy',
+        'PyWavelets',
     ],
     classifiers=[
         'Development Status :: 4 - Beta',
