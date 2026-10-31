@@ -29,6 +29,49 @@ Signal models (``signal_model``):
   mono             mono-exponential decay at R2* = R2 + R2', phase linear in TE [1].
   hollow-cylinder  white matter holds myelin, axonal and extra-axonal water pools (Wharton &
                    Bowtell 2012 [2]); elsewhere mono. Requires ``relaxation="ridani"``.
+  mesoscopic       brain voxels get the signal of explicit sub-voxel sources from a look-up
+                   table (:mod:`qsm_forward.mesoscopic`): myelinated axons as hollow cylinders
+                   with the Wharton & Bowtell sheath tensor and iron as sphere populations,
+                   diffusion Monte Carlo (``meso_table="diffusion"``, default) or static
+                   dephasing (``"static"``). White matter uses its fibre angle, other tissue the
+                   orientation average. Two χ- maps, on purpose:
+                     ``*_Chimap-neg``  the input map as the orientation-independent sheath
+                                       χ·MVF: the ground truth χ- is scored against.
+                     ``*_desc-apparent_Chimap-neg``  the voxel-mean sheath tensor projected on
+                                       B0 (equal to the above outside white matter; in white
+                                       matter |apparent| ≈ 0.6·|χ-| at θ < 30°).
+                   The field is computed from χ+ + apparent χ-, and ``*_Chimap`` (the χ input
+                   every method gets) is that same total, so field and χ input agree with each
+                   other and with the signal; consequently χ+ + χ- (scored) differs from
+                   ``*_Chimap`` in white matter by the anisotropy. The extra-/intra-axonal
+                   water's intrinsic R2 is the tissue R2 map minus the LUT's own spin-echo loss
+                   (iron, myelin water), floored at the head model's CSF R2, so the simulated SE
+                   reproduces ``*_R2map`` except where the floor binds (sidecar
+                   ``SignalModel.IntrinsicR2``, ``*_desc-r2floor_mask``).
+  spheres          brain voxels get the signal of water-containing para- and diamagnetic
+                   spheres (Chen et al. 2021's simulation [7]), static dephasing, 3 T, with the
+                   intra-source convention ``sphere_convention`` ("decompose": water inside a
+                   source precesses at (2/3)χγB0; "lorentz": Lorentz-corrected). With
+                   ``chimap_echoes`` the per-echo χ(TE) input of DECOMPOSE-QSM is written as
+                   ``*_Chimap-echoes.nii``: the ground-truth χ plus [STAR(echo i) -
+                   STAR_ref(echo i)], per-echo STAR-QSM of the noiseless local phase minus the
+                   same reconstruction of a perfectly linear phase (ground-truth field × TE),
+                   so STAR's own echo dependence cancels and only the tissue's remains (zero
+                   for a linear phase; ≈ 0 with the Lorentz convention)
+                   (:func:`qsm_forward.mesoscopic.star_chimap_echoes`).
+                   Bulk χ± become sphere volume fractions ζ± and source susceptibilities χ_s±
+                   (ζ·χ_s = bulk) by ``sphere_source_range``: "in-range" (the default) keeps
+                   χ_s <= ``sphere_chi_s_max`` (default: the source-phase limit
+                   π/((2/3)γB0·TE_max), 0.127 ppm for 16 echoes to 46.2 ms; inside Chen et al.
+                   2021's simulated 0.01-0.15 ppm) and reaches the bulk by the fraction, up to a
+                   total ζ+ + ζ- of ``sphere_zeta_total_max`` (0.60); beyond that χ_s rises and
+                   the voxel is flagged in ``*_desc-sourcerange_mask`` (1; 2 = χ_s clipped at the
+                   LUT's last node). "highchi" is the earlier mapping (ζ <= 0.35, χ_s up to 0.40
+                   ppm in deep grey matter): outside the authors' validated range, a robustness
+                   phantom only (presets ``spheres-3t-*-highchi``).
+  Both need ``relaxation="linear"``: its ``dr`` is the nominal relaxivity recorded in the
+  sidecar, used outside the brain labels and for the ``*_desc-formula_R2prime`` reference; the
+  signal itself takes no relaxivity.
 New signal models plug in through :data:`SIGNAL_MODELS` and :func:`_signal_kwargs`.
 
 The shipped R2' (``r2prime_source``):
@@ -49,6 +92,7 @@ keeps the native grid.
   [4] Yablonskiy D.A., Haacke E.M. Magn Reson Med 1994;32(6):749-763. doi:10.1002/mrm.1910320610
   [5] Shin H.G. et al. NeuroImage 2021;240:118371. doi:10.1016/j.neuroimage.2021.118371
   [6] Dimov A.V. et al. Tomography 2022;8(3):1544-1551. doi:10.3390/tomography8030127
+  [7] Chen J. et al. NeuroImage 2021;242:118477. doi:10.1016/j.neuroimage.2021.118477
 """
 
 from __future__ import annotations
@@ -63,12 +107,14 @@ from typing import Optional
 import nibabel as nib
 import numpy as np
 
+from . import mesoscopic
 from .qsm_forward import (
     DR_KERNEL, ReconParams, TissueParams, generate_bids, generate_dr_maps_ridani,
     generate_r2prime, generate_theta_from_v1, resize,
 )
 
-SIGNAL_MODELS = ("mono", "hollow-cylinder")
+SIGNAL_MODELS = ("mono", "hollow-cylinder", "mesoscopic", "spheres")
+MESO_TABLES = ("diffusion", "static")
 RELAXATION_MODELS = ("ridani", "linear")
 R2_MODELS = ("tissue", "source")
 R2PRIME_SOURCES = ("formula", "fitted")
@@ -112,6 +158,13 @@ class ChisepConfig:
     r2star_relaxivity: Optional[float] = None  # "source": r in R2* = r·(|χ+| + |χ-|)
     signal_model: str = "mono"     # see SIGNAL_MODELS
     hc_b0: Optional[float] = None  # hollow-cylinder pools evaluated at this field (default b0)
+    meso_table: str = "diffusion"  # "mesoscopic": "diffusion" | "static" LUT
+    meso_lut: Optional[str] = None   # "mesoscopic"/"spheres": LUT path (default: mesoscopic.lut_path)
+    sphere_convention: str = "decompose"  # "spheres": "decompose" | "lorentz"
+    chimap_echoes: bool = False    # "spheres": write the per-echo χ(TE) (needs QSM.rs's STAR)
+    sphere_source_range: str = "in-range"  # "spheres": "in-range" | "highchi" (mesoscopic.SourceMapping)
+    sphere_chi_s_max: Optional[float] = None  # "in-range": χ_s cap, ppm (None: source-phase limit at max TE)
+    sphere_zeta_total_max: float = mesoscopic.ZETA_TOTAL_MAX  # "in-range": cap on ζ+ + ζ-
     r2prime_source: str = "formula"  # see R2PRIME_SOURCES
     peak_snr: float = 100.0
     noiseless: bool = False
@@ -139,6 +192,18 @@ class ChisepConfig:
                 raise ValueError("r2_model='source' needs r2star_relaxivity >= dr (R2 = (r - dr)·Σ|χ| >= 0)")
         if self.signal_model == "hollow-cylinder" and self.relaxation != "ridani":
             raise ValueError("signal_model='hollow-cylinder' is defined for relaxation='ridani'")
+        check("meso_table", MESO_TABLES)
+        check("sphere_convention", mesoscopic.SPHERE_CONVENTIONS)
+        check("sphere_source_range", mesoscopic.SOURCE_RANGES)
+        if not 0 < self.sphere_zeta_total_max < 1:
+            raise ValueError("sphere_zeta_total_max must be in (0, 1)")
+        if self.signal_model in ("mesoscopic", "spheres") and self.relaxation != "linear":
+            raise ValueError(f"signal_model={self.signal_model!r} needs relaxation='linear' (its dr is the "
+                             "nominal relaxivity outside the brain labels and of the formula R2')")
+        if self.signal_model == "spheres" and self.b0 != 3.0:
+            raise ValueError("signal_model='spheres' is tabulated at 3 T only")
+        if self.chimap_echoes and self.signal_model != "spheres":
+            raise ValueError("chimap_echoes is defined for signal_model='spheres'")
 
 
 _RIDANI = dict(dr_model="scaled", noiseless=True, se=False, r2=True, voxel=0.0, tr=0.05, flip_angle=15.0)
@@ -148,6 +213,13 @@ _RIDANI_3T = dict(b0=3.0, tes_ms=(3, 7, 11, 15, 19, 23), **_RIDANI)
 _LINEAR_3T = dict(b0=3.0, tes_ms=(5, 10, 15, 20, 25, 30), se_tes_ms=(10, 30, 50, 70), voxel=1.0,
                   anisotropic=True, relaxation="linear", r2prime_source="fitted", peak_snr=100.0,
                   se=True, r2=True)
+
+# Mesoscopic and sphere phantoms: 1 mm, peak SNR 100, matched spin echo, R2' fitted from the
+# signals, isotropic χ- input (the orientation dependence comes out of the signal model).
+_MESO = dict(voxel=1.0, anisotropic=False, relaxation="linear", r2prime_source="fitted",
+             peak_snr=100.0, se=True, r2=True, se_tes_ms=(10, 30, 50, 70))
+# Chen et al. 2021's in vivo 3 T protocol: 16 echoes 2.7:2.9:46.2 ms, TR 59.3 ms
+_CHEN_3T = dict(b0=3.0, tes_ms=tuple(round(2.7 + 2.9 * i, 1) for i in range(16)), tr=0.0593)
 
 PRESETS = {
     # As published by Ridani et al. (2026): noiseless, GRE-only, native resolution.
@@ -172,6 +244,37 @@ PRESETS = {
     "r2star-3t": ChisepConfig(dr=dr_toolbox(3.0), r2_model="source", r2star_relaxivity=R2STAR_RELAXIVITY_3T,
                               **_LINEAR_3T,
                               description="3 T co-located linear R2' (Dr = 141.7) with R2* = 274·(|χ+| + |χ-|)"),
+    # Mesoscopic myelin + iron (diffusion Monte Carlo LUT), Chen-like 3 T protocol.
+    "meso-3t": ChisepConfig(signal_model="mesoscopic", meso_table="diffusion", dr=dr_toolbox(3.0),
+                            **_CHEN_3T, **_MESO,
+                            description="3 T mesoscopic sub-voxel sources (hollow-cylinder myelin, iron spheres; diffusion)"),
+    # 7 T, 8 echoes 3-45 ms, white matter from mesoscopic hollow cylinders (not a closed form).
+    "wm-micro-7t": ChisepConfig(signal_model="mesoscopic", meso_table="diffusion", dr=dr_toolbox(7.0),
+                                b0=7.0, tes_ms=(3, 9, 15, 21, 27, 33, 39, 45), **_MESO,
+                                description="7 T mesoscopic white-matter microstructure (hollow cylinders; diffusion)"),
+    # Water-containing spheres after Chen et al. 2021, per-echo χ(TE); one per intra-source convention.
+    # Source χ_s inside the authors' simulated range (<= the source-phase limit, 0.127 ppm), the bulk
+    # reached by the volume fraction (ζ+ + ζ- <= 0.60; beyond it flagged in desc-sourcerange_mask).
+    "spheres-3t-paper": ChisepConfig(signal_model="spheres", sphere_convention="decompose", chimap_echoes=True,
+                                     dr=dr_static_dephasing(3.0), **_CHEN_3T, **_MESO,
+                                     description="3 T water-containing sub-voxel spheres, intra-source water at (2/3)χγB0, "
+                                                 "source χ in the authors' range"),
+    "spheres-3t-lorentz": ChisepConfig(signal_model="spheres", sphere_convention="lorentz", chimap_echoes=True,
+                                       dr=dr_static_dephasing(3.0), **_CHEN_3T, **_MESO,
+                                       description="3 T water-containing sub-voxel spheres, Lorentz-corrected intra-source field, "
+                                                   "source χ in the authors' range"),
+    # Robustness only: the earlier mapping (ζ <= 0.35, source χ up to 0.40 ppm in deep grey matter),
+    # OUTSIDE the authors' validated 0.01-0.15 ppm; intra-voxel beats DECOMPOSE's model can't fit.
+    "spheres-3t-paper-highchi": ChisepConfig(signal_model="spheres", sphere_convention="decompose", chimap_echoes=True,
+                                             sphere_source_range="highchi", dr=dr_static_dephasing(3.0),
+                                             **_CHEN_3T, **_MESO,
+                                             description="3 T water-containing spheres, (2/3)χγB0 convention, source χ up to "
+                                                         "0.40 ppm (outside the authors' range; robustness)"),
+    "spheres-3t-lorentz-highchi": ChisepConfig(signal_model="spheres", sphere_convention="lorentz", chimap_echoes=True,
+                                               sphere_source_range="highchi", dr=dr_static_dephasing(3.0),
+                                               **_CHEN_3T, **_MESO,
+                                               description="3 T water-containing spheres, Lorentz-corrected, source χ up to "
+                                                           "0.40 ppm (outside the authors' range; robustness)"),
 }
 
 
@@ -247,11 +350,50 @@ def _downsample_theta(theta, ds):
     return out
 
 
-def _signal_kwargs(config: ChisepConfig) -> dict:
-    """generate_bids keyword arguments that select ``config.signal_model``."""
+def _signal_kwargs(config: ChisepConfig, factor=None) -> dict:
+    """generate_bids keyword arguments that select ``config.signal_model``. ``factor`` is the
+    per-voxel model of the LUT-driven signal models (:func:`signal_factor`)."""
     if config.signal_model == "hollow-cylinder":
         return dict(chisep_multicompartment=True, chisep_hc_b0=config.hc_b0)
+    if config.signal_model in ("mesoscopic", "spheres"):
+        return dict(signal_factor=factor)
     return {}
+
+
+def load_lut(config: ChisepConfig):
+    """The LUT of a LUT-driven signal model, or None."""
+    if config.signal_model == "mesoscopic":
+        return mesoscopic.MesoLUT(mesoscopic.lut_path(config.meso_table, config.meso_lut))
+    if config.signal_model == "spheres":
+        return mesoscopic.SphereLUT(mesoscopic.lut_path("spheres", config.meso_lut))
+    return None
+
+
+def signal_factor(config: ChisepConfig, lut, chi_pos, chi_neg, theta_deg, seg):
+    """Per-voxel signal model on the simulation grid for ``config.signal_model`` (or None)."""
+    if config.signal_model == "mesoscopic":
+        return mesoscopic.MesoscopicSignal(lut, chi_pos, chi_neg, theta_deg, seg, config.b0,
+                                           se_tes_ms=config.se_tes_ms)
+    if config.signal_model == "spheres":
+        return mesoscopic.SphereSignal(lut, chi_pos, chi_neg, seg, config.b0, config.sphere_convention,
+                                       mapping=sphere_mapping(config))
+    return None
+
+
+def sphere_mapping(config: ChisepConfig) -> "mesoscopic.SourceMapping":
+    """Bulk χ± -> sphere parameters for ``config.sphere_source_range`` (see the module docstring)."""
+    if config.sphere_source_range == "highchi":
+        return mesoscopic.HIGHCHI
+    cap = config.sphere_chi_s_max or float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0))
+    return mesoscopic.SourceMapping("in-range", cap, config.sphere_zeta_total_max)
+
+
+def fibre_theta(theta_deg, seg):
+    """Fibre angle (degrees) where the mesoscopic model uses one: white matter with a fibre
+    direction; NaN elsewhere (orientation average)."""
+    th = np.asarray(theta_deg, float) if theta_deg is not None else np.full(np.shape(seg), np.nan)
+    wm = np.rint(np.asarray(seg)).astype(int) == mesoscopic.WM_LABEL
+    return np.where(wm & np.isfinite(th), th, np.nan)
 
 
 def phantom_metadata(config: ChisepConfig, maps: ChisepMaps) -> dict:
@@ -267,6 +409,9 @@ def phantom_metadata(config: ChisepConfig, maps: ChisepMaps) -> dict:
                  "DrNegMax": float(np.nanmax(maps.dr_neg))}
     if config.r2_model == "source":
         relax["R2starRelaxivity"] = float(config.r2star_relaxivity)
+    if config.signal_model in ("mesoscopic", "spheres"):
+        relax["Note"] = ("nominal: the signal takes no relaxivity inside the brain labels; Dr is used outside "
+                         "them and for the desc-formula R2' reference")
     return {
         "ChiSeparationPhantom": asdict(config),
         "Relaxivity": relax,
@@ -315,6 +460,19 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
     affine = tp.nii_affine if native else resize(
         nib.Nifti1Image(chi_total, tp.nii_affine, tp.nii_header), voxel).affine
 
+    # LUT-driven signal models, on the simulation grid
+    lut = load_lut(config)
+    factor = None
+    chi_neg_app = None
+    if lut is not None:
+        seg_sim = ds(tp.seg.get_fdata(), "nearest")
+        theta_fibre = fibre_theta(theta, seg_sim)
+        if config.signal_model == "mesoscopic":
+            # the field follows the voxel-mean sheath tensor: apparent χ- in white matter
+            chi_neg_app = mesoscopic.chi_neg_apparent(chi_neg, np.deg2rad(theta_fibre)).astype(np.float32)
+            chi_total = chi_pos + chi_neg_app
+        factor = signal_factor(config, lut, chi_pos, chi_neg, theta_fibre, seg_sim)
+
     with tempfile.TemporaryDirectory() as tmpd:
         def w(name, arr):
             p = os.path.join(tmpd, name)
@@ -348,7 +506,7 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
             dr_pos_map=dr_pos, dr_neg_map=dr_neg, dr=DR_KERNEL,
             chisep_signal=True, save_se=config.se, save_r2=config.r2,
             r2prime_source=config.r2prime_source,
-            **_signal_kwargs(config),
+            **_signal_kwargs(config, factor),
         )
 
     anat = os.path.join(bids_dir, "derivatives", "qsm-forward", f"sub-{subject}", "anat")
@@ -357,7 +515,7 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
     ref = sorted(glob.glob(os.path.join(anat, "*_Chimap-neg.nii*")))[0]
     ref_nii = nib.load(ref)
     stem = os.path.basename(ref).split("_Chimap-neg")[0]
-    if theta is not None and config.anisotropic:
+    if theta is not None and (config.anisotropic or config.signal_model == "mesoscopic"):
         # [0, 90]: interpolation can overshoot past 90° (harmless for cos²θ, but keep it physical)
         out = os.path.join(anat, f"{stem}_fibreangle.nii")
         nib.save(nib.Nifti1Image(np.clip(np.nan_to_num(theta), 0.0, 90.0).astype(np.float32),
@@ -372,9 +530,48 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         out = os.path.join(anat, f"{stem}_desc-wmrois_dseg.nii")
         nib.save(nib.Nifti1Image(np.rint(lab).astype(np.int16), ref_nii.affine, ref_nii.header), out)
         written["wmrois"] = out
+    def save_like_ref(name, arr):
+        p = os.path.join(anat, f"{stem}_{name}.nii")
+        nib.save(nib.Nifti1Image(np.asarray(arr, np.float32), ref_nii.affine, ref_nii.header), p)
+        return p
+
+    meta = phantom_metadata(config, maps)
+    if config.signal_model == "mesoscopic":
+        written["chi_neg_apparent"] = save_like_ref("desc-apparent_Chimap-neg", np.abs(chi_neg_app))
+        meta["SignalModel"] = {
+            "Model": "mesoscopic", "Table": lut.mode, "LUT": os.path.basename(lut.path),
+            "LUTParameters": lut.params, "IronRelaxivity": lut.iron_relaxivity(config.b0),
+            "IntrinsicR2": factor.floor_report(seg_sim),
+            "ChiNeg": "scored: orientation-independent sheath χ·MVF (= input map); "
+                      "desc-apparent: voxel-mean sheath tensor projected on B0 (drives the field)",
+            "Chimap": "χ+ + apparent χ-: the total the simulated field is computed from",
+        }
+        floor = np.zeros(factor.mask.shape, np.uint8)
+        floor[factor.mask] = factor.floored
+        out = os.path.join(anat, f"{stem}_desc-r2floor_mask.nii")
+        nib.save(nib.Nifti1Image(floor, ref_nii.affine, ref_nii.header), out)
+        written["r2floor_mask"] = out
+    elif config.signal_model == "spheres":
+        meta["SignalModel"] = {"Model": "spheres", "Convention": config.sphere_convention,
+                               "LUT": os.path.basename(lut.path),
+                               "WrapLimitPpm": float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0)),
+                               "Sources": factor.source_report(max(config.tes_ms))}
+        flag = np.zeros(factor.mask.shape, np.uint8)
+        flag[factor.mask] = factor.source_flag
+        out = os.path.join(anat, f"{stem}_desc-sourcerange_mask.nii")
+        nib.save(nib.Nifti1Image(flag, ref_nii.affine, ref_nii.header), out)
+        written["sourcerange_mask"] = out
+        if config.chimap_echoes:
+            written["chimap_echoes"] = write_chimap_echoes(anat, stem, config, factor)
+            meta["SignalModel"]["ChimapEchoes"] = (
+                "χ_GT + [STAR(echo i) - STAR_ref(echo i)]: per-echo STAR-QSM (QSM.rs, exact port of "
+                "STI Suite 3.0 QSM_star) of the noiseless local phase, Laplacian-unwrapped (STI "
+                "MRPhaseUnwrap settings), mask mean removed; STAR_ref = the same processing of a "
+                "perfectly linear phase (ground-truth local field × TE), so STAR's own echo "
+                "dependence cancels and only the tissue's remains")
     out = os.path.join(anat, f"{stem}_chisep.json")
     with open(out, "w") as f:
-        json.dump(phantom_metadata(config, maps), f, indent=2)
+        json.dump(meta, f, indent=2)
     written["metadata"] = out
     for key, pattern in (("r2prime", "_R2prime.nii*"), ("r2prime_formula", "_desc-formula_R2prime.nii*"),
                          ("r2", "_R2map.nii*")):
@@ -382,3 +579,31 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         if hits:
             written[key] = hits[0]
     return written
+
+
+def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, unwrap="laplacian"):
+    """Write ``*_Chimap-echoes.nii`` (4D, ppm) for a ``spheres`` phantom from the written ground
+    truth (``*_Chimap``, ``*_fieldmap-local``, ``*_mask``) and the per-voxel intra-voxel phase
+    (:func:`qsm_forward.mesoscopic.star_chimap_echoes`). ``tools`` defaults to
+    :class:`qsm_forward.mesoscopic.QsmrsTools`."""
+    tools = tools or mesoscopic.QsmrsTools()
+    load = lambda name: nib.load(os.path.join(anat, f"{stem}_{name}.nii"))
+    ref = load("Chimap")
+    chi_gt = ref.get_fdata()
+    local = load("fieldmap-local").get_fdata()
+    mask = load("mask").get_fdata() > 0.5
+    if local.shape != factor.mask.shape:
+        raise ValueError("chimap_echoes needs the signal simulated on the output grid")
+    tes = np.asarray(config.tes_ms, float)
+    intra = np.zeros((len(tes),) + local.shape)
+    ph = factor.lut.unwrapped_phase(factor._cp, factor._cn, tes, factor.convention, factor.interp,
+                                    mapping=factor.mapping)
+    intra[:, factor.mask] = ph.T
+    phases = mesoscopic.echo_local_phases(local, tes, config.b0, intra)
+    ref_phases = mesoscopic.echo_local_phases(local, tes, config.b0)
+    voxel = np.asarray(ref.header.get_zooms()[:3], float)
+    chi_e = mesoscopic.star_chimap_echoes(chi_gt, phases, ref_phases, mask, tes, config.b0, voxel, tools,
+                                          unwrap=unwrap)
+    out = os.path.join(anat, f"{stem}_Chimap-echoes.nii")
+    nib.save(nib.Nifti1Image(np.moveaxis(chi_e, 0, -1).astype(np.float32), ref.affine), out)
+    return out
