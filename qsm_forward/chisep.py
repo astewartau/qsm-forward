@@ -107,7 +107,7 @@ from typing import Optional
 import nibabel as nib
 import numpy as np
 
-from . import mesoscopic
+from . import degrade, mesoscopic
 from .qsm_forward import (
     DR_KERNEL, ReconParams, TissueParams, generate_bids, generate_dr_maps_ridani,
     generate_r2prime, generate_theta_from_v1, resize,
@@ -171,6 +171,7 @@ class ChisepConfig:
     seed: int = 42
     se: bool = True                # save the matched multi-echo spin echo
     r2: bool = False               # save the ground-truth R2 map
+    degrade_levels: tuple = ()     # also write these degraded-input levels (qsm_forward.degrade.LEVELS)
     v1_flip: bool = True           # register V1 (stored L-A-S) to the R-A-S maps
     description: str = ""
 
@@ -204,6 +205,9 @@ class ChisepConfig:
             raise ValueError("signal_model='spheres' is tabulated at 3 T only")
         if self.chimap_echoes and self.signal_model != "spheres":
             raise ValueError("chimap_echoes is defined for signal_model='spheres'")
+        bad = [lv for lv in self.degrade_levels if lv not in degrade.LEVELS]
+        if bad:
+            raise ValueError(f"degrade_levels must be among {degrade.LEVELS}, got {bad}")
 
 
 _RIDANI = dict(dr_model="scaled", noiseless=True, se=False, r2=True, voxel=0.0, tr=0.05, flip_angle=15.0)
@@ -578,7 +582,58 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         hits = sorted(glob.glob(os.path.join(anat, f"{stem}{pattern}")))
         if hits:
             written[key] = hits[0]
+    if factor is not None:
+        written["subvoxel_field"] = write_subvoxel_field(bids_dir, config, subject, factor=factor)
+    if config.degrade_levels:
+        for level, paths in degrade.degrade_bids(bids_dir, config.degrade_levels, subject=subject,
+                                                 seed=config.seed).items():
+            for key, path in paths.items():
+                written[f"degraded{level}_{key}"] = path
     return written
+
+
+def subvoxel_field(factor, tes_s, b0, R2):
+    """Frequency (ppm) that an ideal multi-echo field fit measures in each voxel BEYOND the dipole
+    field: the slope through the origin of the intra-voxel phase of a LUT signal model (myelin water,
+    iron-sphere and sheath frequency shifts), weighted by |S|^2 (inverse phase variance). Zero
+    outside the model's voxels. The ground-truth local field is the dipole field of ``*_Chimap``
+    only, so any field step run on the simulated phase sees this on top (degrade.py adds it)."""
+    t = np.asarray(tes_s, float)
+    mask = factor.mask
+    vals = np.stack([factor.gre(te, R2)[1] for te in t], -1)
+    ph = np.unwrap(np.concatenate([np.zeros(vals.shape[:-1] + (1,)), np.angle(vals)], -1), axis=-1)[..., 1:]
+    w = np.abs(vals) ** 2
+    slope = (w * t * ph).sum(-1) / np.maximum((w * t * t).sum(-1), 1e-30)
+    out = np.zeros(mask.shape, np.float32)
+    out[mask] = slope / (2 * np.pi * degrade.GAMMA_BAR * b0)
+    return out
+
+
+def write_subvoxel_field(bids_dir, config: ChisepConfig, subject="1", factor=None):
+    """Write ``*_desc-subvoxel_fieldmap.nii`` (ppm, :func:`subvoxel_field`) for a LUT signal model,
+    rebuilding the per-voxel model from the written derivatives (χ+, |χ-|, fibre angle, dseg, R2)
+    unless ``factor`` is given. Returns the path, or None for a model without sub-voxel phase."""
+    if config.signal_model not in ("mesoscopic", "spheres"):
+        return None
+    anat = os.path.join(bids_dir, "derivatives", "qsm-forward", f"sub-{subject}", "anat")
+    ref = sorted(f for f in glob.glob(os.path.join(anat, "*_Chimap-neg.nii*")) if "_desc-" not in f)[0]
+    stem = os.path.basename(ref).split("_Chimap-neg")[0]
+    load = lambda name: np.asarray(nib.load(os.path.join(anat, f"{stem}_{name}.nii")).dataobj, float)
+    r2_path = os.path.join(anat, f"{stem}_R2map.nii")
+    seg = load("dseg")
+    R2 = load("R2map") if os.path.exists(r2_path) else np.zeros(seg.shape)
+    if factor is None:
+        theta = None
+        if os.path.exists(os.path.join(anat, f"{stem}_fibreangle.nii")):
+            theta = load("fibreangle")
+            theta[theta == 0] = np.nan   # written as 0 where there is no fibre direction
+        factor = signal_factor(config, load_lut(config), load("Chimap-pos"), -np.abs(load("Chimap-neg")),
+                               fibre_theta(theta, seg), seg)
+    ref_nii = nib.load(ref)
+    out = os.path.join(anat, f"{stem}_desc-subvoxel_fieldmap.nii")
+    tes = np.asarray(config.tes_ms, float) * 1e-3
+    nib.save(nib.Nifti1Image(subvoxel_field(factor, tes, config.b0, R2), ref_nii.affine, ref_nii.header), out)
+    return out
 
 
 def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, unwrap="laplacian"):

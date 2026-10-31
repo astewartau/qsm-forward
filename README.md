@@ -321,6 +321,19 @@ qsm-forward chi-sep ~/data bids --B0 7 --voxel-size 1 1 1 --peak-snr 100 --save-
 - The look-up tables are downloaded on first use from [qsmxt/qsm-forward-mesoscopic-luts](https://huggingface.co/datasets/qsmxt/qsm-forward-mesoscopic-luts) (pinned, SHA-256 checked) into `~/.cache/qsm-forward`. To use a local copy, set `$QSM_FORWARD_MESO_LUT_DIR` to the directory holding them.
 - Each phantom writes `*_chisep.json` next to its derivatives: the configuration and the relaxivity it imposes.
 
+### Degraded derived inputs
+
+A χ-separation method normally reads inputs a QSM pipeline derived from the noisy signal, not the ground truth. `qsm-forward degrade BIDS --levels L1 L2 L3` (or `--degrade L1 L2 L3` with `chi-sep --preset`, or a preset's `degrade_levels`) writes, next to the ground truth, inputs with the error traits of real QSM pipelines added term by term (`qsm_forward.degrade`):
+
+| Level | Local field | χ | R2′ |
+|---|---|---|---|
+| L0 | ground truth | ground truth | as shipped |
+| L1 | + field-fit noise from the dataset's SNR, shaped to the measured field-step noise spectrum | + the same noise through a regularised inverse | fitted from the noisy GRE and spin echo |
+| L2 | + the sub-voxel frequency of the signal model; low-\|k\| loss of background removal | magic-cone attenuation, low-\|k\| loss and smoothing of the ground truth | as L1 |
+| L3 | + residual smooth background | + residual background, boundary error, mean reference; mask eroded | as L1 |
+
+Each level is written as `*_desc-degraded<L>_{fieldmap-local,Chimap,Chimap-echoes,R2prime,mask}.nii` with `*_desc-degraded<L>_degradation.json` (every parameter, the seed, the version). All levels share one noise seed. Each parameter is the median over six QSMxT pipelines (iLSQR, TKD, NLTV, MEDI, TFI, iR2QSM) run on the `meso-3t` phantom; its range across them is in the sidecar (`CalibrationSpread`) and `qsm_forward.degrade.CALIBRATION_SPREAD`. `--set PARAM=VALUE` overrides any of them. The LUT signal models also write `*_desc-subvoxel_fieldmap.nii`: the frequency an ideal field fit measures beyond the dipole field.
+
 The Python `generate_bids(...)` example below shows the lower-level API (a single Dr kernel, no orientation dependence); the `chi-sep` subcommand wraps `generate_dr_maps_ridani` to build the source- and orientation-dependent relaxivity described later.
 
 ```python

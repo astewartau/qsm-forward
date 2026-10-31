@@ -2,7 +2,7 @@
 
 import argparse
 import qsm_forward
-from qsm_forward import chisep
+from qsm_forward import chisep, degrade
 import numpy as np
 
 
@@ -58,6 +58,30 @@ def add_common_args(p):
     p.add_argument('--se-TEs', default=[10e-3, 30e-3, 50e-3, 70e-3], type=float, nargs='+', help='Echo times (s) for the spin-echo acquisition')
 
 
+def parse_overrides(items):
+    """PARAM=VALUE strings -> a dict of :class:`qsm_forward.degrade.DegradationParams` overrides,
+    each value converted to the field's type ('none' -> None)."""
+    import dataclasses
+    types = {f.name: f.type for f in dataclasses.fields(degrade.DegradationParams)}
+    out = {}
+    for item in items:
+        key, _, val = item.partition('=')
+        if key not in types or not _:
+            raise SystemExit(f"--set: expected PARAM=VALUE with PARAM in {sorted(types)}, got {item!r}")
+        t = str(types[key])
+        if val.lower() == 'none':
+            out[key] = None
+        elif 'bool' in t:
+            out[key] = argparse_bool(val)
+        elif 'int' in t:
+            out[key] = int(val)
+        elif 'float' in t:
+            out[key] = float(val)
+        else:
+            out[key] = val
+    return out
+
+
 def make_recon_params(args):
     return qsm_forward.ReconParams(
         subject=args.subject, session=args.session, acq=args.acq, run=args.run,
@@ -79,6 +103,16 @@ def main():
     head_parser = subparsers.add_parser('head', help='Realistic in-silico head phantom')
     simple_parser = subparsers.add_parser('simple', help='Simple susceptibility sources')
     chisep_parser = subparsers.add_parser('chi-sep', help='Susceptibility source-separation phantom (Ridani et al. 2026)')
+    degrade_parser = subparsers.add_parser(
+        'degrade', help="Write degraded derived inputs (local field, chi, R2', per-echo chi) of an existing phantom")
+    degrade_parser.add_argument('bids', help='BIDS directory of a qsm-forward phantom (ground truth in derivatives/qsm-forward)')
+    degrade_parser.add_argument('--subject', default='1')
+    degrade_parser.add_argument('--levels', nargs='+', default=['L1', 'L2', 'L3'], choices=list(degrade.LEVELS),
+                                help='Degradation levels to write (see qsm_forward.degrade; L0 is the ground truth itself)')
+    degrade_parser.add_argument('--seed', type=int, default=None,
+                                help="Noise seed shared by every level (default: the phantom's own seed, else 42)")
+    degrade_parser.add_argument('--set', nargs='+', default=[], metavar='PARAM=VALUE',
+                                help='Override a degradation parameter at every level (e.g. chi_lowk_loss=0.3)')
 
     head_parser.add_argument('data', help='Head phantom data directory (download from https://doi.org/10.34973/m20r-jt17)')
     chisep_parser.add_argument('data', help='Head phantom data directory; must also contain maps/V1.nii.gz and masks/white_matter_mask.nii.gz for anisotropy, and raw/rawField.nii.gz')
@@ -126,15 +160,28 @@ def main():
     chisep_parser.add_argument('--r2prime-source', choices=list(chisep.R2PRIME_SOURCES), default=None,
                                help="With --preset: override what the shipped R2' holds ('formula': the imposed R2'; "
                                     "'fitted': R2* - R2 fitted from the noiseless GRE and spin echo)")
+    chisep_parser.add_argument('--degrade', nargs='+', default=None, choices=list(degrade.LEVELS), metavar='LEVEL',
+                               help="With --preset: also write these degraded-input levels next to the ground truth "
+                                    "(qsm_forward.degrade; overrides the preset's degrade_levels)")
     chisep_parser.add_argument('--wm-rois', default=None,
                                help='With --preset: white-matter label atlas on the native grid (e.g. Ridani WM_fibers_seg.nii.gz) '
                                     'to resample into the derivatives')
 
     args = parser.parse_args()
 
+    if args.mode == 'degrade':
+        written = degrade.degrade_bids(args.bids, args.levels, subject=args.subject, seed=args.seed,
+                                       overrides=parse_overrides(args.set))
+        for level, paths in written.items():
+            for k, v in paths.items():
+                print(f"  {level} {k}: {v}")
+        return
+
     # ---- chi-separation phantom (Ridani et al. 2026) ----
     if args.mode == 'chi-sep' and args.preset:
         overrides = {} if args.r2prime_source is None else {"r2prime_source": args.r2prime_source}
+        if args.degrade is not None:
+            overrides["degrade_levels"] = tuple(args.degrade)
         written = chisep.generate_chisep_bids(args.data, args.bids, chisep.preset(args.preset, **overrides),
                                               subject=args.subject, wm_rois=args.wm_rois)
         for k, v in written.items():
