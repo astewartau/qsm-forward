@@ -56,11 +56,10 @@ Ground truth and conventions
       (log S is linear in volume fraction in the dilute static limit); χ-, θ and TE are clipped
       to the table.
 
-LUT files (not in the repository; several MB each) are found through ``lut_path``: an
-explicit path, else ``$QSM_FORWARD_MESO_LUT_DIR/<name>``.
-TODO: publish the LUTs as a versioned download (e.g. a GitHub release asset of
-astewartau/qsm-forward or a Hugging Face dataset) and fetch them on demand into a cache;
-until then they are read from a local path.
+LUT files (not in the repository; 6-28 MB each) are found through ``lut_path``: an explicit
+path, else ``$QSM_FORWARD_MESO_LUT_DIR/<name>``, else a download from the Hugging Face dataset
+``qsmxt/qsm-forward-mesoscopic-luts`` at a pinned revision into a per-user cache, checked
+against its SHA-256 (``LUT_SHA256``). The dataset's README documents the tables.
 
 References
     Wharton S., Bowtell R. PNAS 2012;109:18559. doi:10.1073/pnas.1211075109
@@ -72,10 +71,12 @@ References
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 from typing import Callable, Optional
 
 import numpy as np
@@ -101,9 +102,61 @@ LUT_FILES = {
 }
 
 
+LUT_SHA256 = {
+    "meso_diffusion_v3.npz": "2d7508c547810ddf13e527f9d199d31b37f07e0b751a5a6bd6d8e5e9ccdc60b8",
+    "meso_static_v3.npz": "a66a336e7d298ea2ea27d7c7677e9e70ff9a1bc9e2379834d5dfd04a946ea5a1",
+    "spheres_a3_v2.npz": "38ec5f8fdd734c80bea7c1b662e45e7a31dab6eba69ec0bd2c16ed1d49546b6b",
+}
+# Pinned so a phantom generated today is regenerated from the same tables; bump it together
+# with LUT_FILES / LUT_SHA256 when a table changes.
+LUT_REPO = "qsmxt/qsm-forward-mesoscopic-luts"
+LUT_REVISION = "04541e4559943343065fc697e3b8315cc8733d2a"
+
+
+def _lut_cache_dir() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "qsm-forward", "meso-luts", LUT_REVISION[:12])
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _fetch(url: str, dest: str) -> None:
+    with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def _download_lut(name: str) -> str:
+    """The cached copy of LUT ``name``, downloaded and SHA-256-checked on first use."""
+    cache = _lut_cache_dir()
+    p = os.path.join(cache, name)
+    if os.path.exists(p) and _sha256(p) == LUT_SHA256[name]:
+        return p
+    os.makedirs(cache, exist_ok=True)
+    url = f"https://huggingface.co/datasets/{LUT_REPO}/resolve/{LUT_REVISION}/{name}"
+    fd, tmp = tempfile.mkstemp(dir=cache, suffix=".part")
+    os.close(fd)
+    try:
+        _fetch(url, tmp)
+        got = _sha256(tmp)
+        if got != LUT_SHA256[name]:
+            raise OSError(f"{name} from {url} has SHA-256 {got}, expected {LUT_SHA256[name]}")
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return p
+
+
 def lut_path(kind: str, path: Optional[str] = None) -> str:
     """Path of LUT ``kind`` ("diffusion", "static" or "spheres"): ``path`` if given, else
-    ``$QSM_FORWARD_MESO_LUT_DIR/<LUT_FILES[kind]>``."""
+    ``$QSM_FORWARD_MESO_LUT_DIR/<LUT_FILES[kind]>``, else the pinned Hugging Face copy, downloaded
+    into the cache on first use."""
     if path:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
@@ -111,14 +164,12 @@ def lut_path(kind: str, path: Optional[str] = None) -> str:
     if kind not in LUT_FILES:
         raise KeyError(f"unknown LUT {kind!r}; choose from {sorted(LUT_FILES)}")
     root = os.environ.get(LUT_ENV)
-    if not root:
-        raise FileNotFoundError(
-            f"the {kind} LUT ({LUT_FILES[kind]}) is not bundled; set ${LUT_ENV} to the directory "
-            f"holding it, or pass its path (ChisepConfig.meso_lut)")
-    p = os.path.join(root, LUT_FILES[kind])
-    if not os.path.exists(p):
-        raise FileNotFoundError(p)
-    return p
+    if root:
+        p = os.path.join(root, LUT_FILES[kind])
+        if not os.path.exists(p):
+            raise FileNotFoundError(p)
+        return p
+    return _download_lut(LUT_FILES[kind])
 
 
 def _logsig(S, axis=-1):

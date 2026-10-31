@@ -3,6 +3,7 @@ synthetic look-up tables whose signals are known in closed form. The physics of 
 tables is checked where they are built, not here."""
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -78,10 +79,34 @@ def luts(tmp_path, monkeypatch):
 class TestMesoLUT:
     def test_lut_path(self, luts, monkeypatch):
         assert meso.lut_path("diffusion") == luts[0]
-        monkeypatch.delenv(meso.LUT_ENV)
+        monkeypatch.setenv(meso.LUT_ENV, "/nonexistent")
         with pytest.raises(FileNotFoundError):
             meso.lut_path("diffusion")
         assert meso.lut_path("spheres", luts[1]) == luts[1]
+
+    def test_lut_download_cache_and_checksum(self, luts, monkeypatch, tmp_path):
+        """No env and no path: fetched from the pinned URL into the cache, checked, then reused."""
+        monkeypatch.delenv(meso.LUT_ENV)
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        name = meso.LUT_FILES["diffusion"]
+        monkeypatch.setitem(meso.LUT_SHA256, name, meso._sha256(luts[0]))
+        urls = []
+
+        def fake_fetch(url, dest):
+            urls.append(url)
+            shutil.copyfile(luts[0], dest)
+
+        monkeypatch.setattr(meso, "_fetch", fake_fetch)
+        p = meso.lut_path("diffusion")
+        assert p.startswith(str(tmp_path / "cache")) and meso._sha256(p) == meso.LUT_SHA256[name]
+        assert urls == [f"https://huggingface.co/datasets/{meso.LUT_REPO}/resolve/"
+                        f"{meso.LUT_REVISION}/{name}"]
+        assert meso.lut_path("diffusion") == p and len(urls) == 1      # cached: no second fetch
+
+        monkeypatch.setitem(meso.LUT_SHA256, name, "0" * 64)            # a corrupt download
+        with pytest.raises(OSError, match="SHA-256"):
+            meso.lut_path("diffusion")
+        assert not any(f.endswith(".part") for f in os.listdir(os.path.dirname(p)))
 
     def test_nodes_extrapolation_and_compartments(self, luts):
         L = meso.MesoLUT(luts[0])
