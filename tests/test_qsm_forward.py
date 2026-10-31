@@ -1267,3 +1267,174 @@ class TestMultiSliceAcquisition:
             # and the offsets really were present in the single-echo phase they cancelled out of
             single = np.angle(data["on"][0] * np.conj(data["off"][0]))[present]
             assert np.abs(single).max() > 1.0
+
+
+class TestGenerateT2Map3T:
+    def test_3t_r2_is_scaled_once(self):
+        # T2_simulation.m saves T2_3T = T2/0.65 and GRESimulation.m simulates R2*0.65: one
+        # scaling, R2_3T = 0.65*R2_7T (not 0.65**2)
+        seg = np.full((4, 4, 4), 8)
+        R2star, M0 = np.ones((4, 4, 4)), np.ones((4, 4, 4))
+        T2_7, R2_7 = qsm_forward.generate_t2_map(seg, R2star, M0, B0=7, gaussian_sigma=0)
+        T2_3, R2_3 = qsm_forward.generate_t2_map(seg, R2star, M0, B0=3, gaussian_sigma=0)
+        np.testing.assert_allclose(R2_3, 0.65 * R2_7)
+        np.testing.assert_allclose(T2_3, T2_7 / 0.65)
+        np.testing.assert_allclose(R2_3, 1000.0 / T2_3)
+
+
+class TestFittedR2prime:
+    GRE_TES = np.array([5, 10, 15, 20, 25, 30]) * 1e-3
+    SE_TES = np.array([10, 30, 50, 70]) * 1e-3
+
+    def test_mono_exponential_fit_is_exact(self):
+        r2, r2p = np.array([10.0, 20.0, 0.0]), np.array([5.0, 0.0, 30.0])
+        gre = [2.0 * np.exp(-(r2 + r2p) * te) for te in self.GRE_TES]
+        se = [3.0 * np.exp(-r2 * te) for te in self.SE_TES]
+        np.testing.assert_allclose(qsm_forward.fit_r2prime(gre, self.GRE_TES, se, self.SE_TES), r2p, atol=1e-9)
+
+    def test_no_signal_and_negative_rates_give_zero(self):
+        gre = [np.array([0.0, np.exp(-5 * te)]) for te in self.GRE_TES]
+        se = [np.array([1.0, np.exp(-20 * te)]) for te in self.SE_TES]  # R2 > R2*
+        np.testing.assert_array_equal(qsm_forward.fit_r2prime(gre, self.GRE_TES, se, self.SE_TES), [0.0, 0.0])
+
+    def test_fit_needs_every_echo(self):
+        fit = qsm_forward.MonoExponentialRateFit(self.GRE_TES)
+        fit.add(0, np.ones(2))
+        with pytest.raises(ValueError):
+            fit.rate()
+
+
+def _tiny_chisep_tissue(tmp, n=12):
+    """A small whole-volume chi-sep tissue model, written as NIfTI so it goes through the same
+    loading path as the head phantom."""
+    rng = np.random.default_rng(0)
+    shape = (n, n, n)
+    chi_pos = rng.uniform(0.0, 0.1, shape)
+    chi_neg = -rng.uniform(0.0, 0.05, shape)
+    seg = np.full(shape, 9.0)
+    seg[: n // 2] = 8.0
+    arrays = dict(chi=chi_pos + chi_neg, chi_pos=chi_pos, chi_neg=chi_neg, mask=np.ones(shape),
+                  seg=seg, M0=np.ones(shape), R1=np.ones(shape), R2star=np.full(shape, 30.0))
+    paths = {}
+    for k, v in arrays.items():
+        paths[k] = os.path.join(tmp, f"{k}.nii.gz")
+        nib.save(nib.Nifti1Image(v.astype(np.float32), np.eye(4)), paths[k])
+    return paths, arrays
+
+
+class TestGenerateBidsFittedR2prime:
+    def _run(self, tmp, r2prime_source, save_se):
+        paths, arrays = _tiny_chisep_tissue(tmp)
+        tissue = qsm_forward.TissueParams(root_dir=tmp, **paths)
+        recon = qsm_forward.ReconParams(B0=3, TEs=np.array([5, 10, 15, 20, 25, 30]) * 1e-3,
+                                        voxel_size=np.array([1.0, 1.0, 1.0]), random_seed=None,
+                                        se_TEs=np.array([10, 30, 50, 70]) * 1e-3)
+        dr = np.full(arrays["chi"].shape, 141.7)
+        bids = os.path.join(tmp, "bids")
+        qsm_forward.generate_bids(tissue, recon, bids, save_chi_pos=True, save_chi_neg=True, save_r2prime=True,
+                                  dr_pos_map=dr, dr_neg_map=dr, chisep_signal=True, save_se=save_se,
+                                  r2prime_source=r2prime_source)
+        anat = Path(bids) / "derivatives" / "qsm-forward" / "sub-1" / "anat"
+        return arrays, anat, Path(bids) / "sub-1" / "anat"
+
+    def test_fitted_matches_formula_for_mono_exponential_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            arrays, anat, raw = self._run(tmp, "fitted", save_se=False)
+            fitted = nib.load(anat / "sub-1_R2prime.nii").get_fdata()
+            formula = nib.load(anat / "sub-1_desc-formula_R2prime.nii").get_fdata()
+            expected = 141.7 * (np.abs(arrays["chi_pos"]) + np.abs(arrays["chi_neg"]))
+            np.testing.assert_allclose(formula, expected, rtol=1e-5)
+            np.testing.assert_allclose(fitted, expected, rtol=1e-4, atol=1e-3)
+            assert not list(raw.glob("*MESE*"))  # simulated for the fit, not written
+
+    def test_formula_default_writes_one_r2prime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, anat, raw = self._run(tmp, "formula", save_se=True)
+            assert (anat / "sub-1_R2prime.nii").exists()
+            assert not (anat / "sub-1_desc-formula_R2prime.nii").exists()
+            assert len(list(raw.glob("*_MESE.nii"))) == 4
+
+    def test_rejects_unknown_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(ValueError):
+                self._run(tmp, "oracle", save_se=False)
+
+
+class TestChisepPresets:
+    """Named chi-sep phantom configurations."""
+
+    def test_presets_are_valid(self):
+        from qsm_forward import chisep
+        for name, cfg in chisep.PRESETS.items():
+            assert cfg.signal_model in chisep.SIGNAL_MODELS, name
+            assert len(cfg.tes_ms) >= 3, name
+        for name in ("linear-3t-dr142", "linear-3t-dr114", "linear-3t-dr324", "r2star-3t"):
+            cfg = chisep.PRESETS[name]
+            assert cfg.b0 == 3.0 and cfg.voxel == 1.0 and len(cfg.tes_ms) >= 6 and cfg.se, name
+            assert cfg.relaxation == "linear" and cfg.r2prime_source == "fitted" and not cfg.noiseless, name
+        for name in ("ridani-3t-iso", "ridani-3t-aniso", "ridani-7t-aniso", "chisep-mc"):
+            assert chisep.PRESETS[name].r2prime_source == "formula", name
+
+    def test_relaxivities(self):
+        from qsm_forward import chisep
+        assert chisep.PRESETS["linear-3t-dr142"].dr == pytest.approx(141.72, abs=0.01)
+        assert chisep.PRESETS["linear-3t-dr114"].dr == 114.0
+        assert chisep.PRESETS["linear-3t-dr324"].dr == pytest.approx(323.5, abs=0.1)
+        # the same constant generate_dr_maps_ridani uses for Dr+
+        dr_pos, _ = qsm_forward.generate_dr_maps_ridani(np.ones((2, 2, 2)), None, B0=3.0, anisotropic=False)
+        assert chisep.dr_static_dephasing(3.0) == pytest.approx(dr_pos.max())
+
+    def test_preset_overrides(self):
+        from qsm_forward import chisep
+        cfg = chisep.preset("ridani-3t-aniso", r2prime_source="fitted")
+        assert cfg.r2prime_source == "fitted" and cfg.b0 == 3.0
+        assert chisep.PRESETS["ridani-3t-aniso"].r2prime_source == "formula"  # registry untouched
+
+    def test_invalid_configurations(self):
+        from qsm_forward import chisep
+        with pytest.raises(KeyError):
+            chisep.preset("nope")
+        for bad in (dict(signal_model="nope"), dict(relaxation="linear"),
+                    dict(relaxation="linear", dr=140, r2_model="source", r2star_relaxivity=100),
+                    dict(r2_model="source", r2star_relaxivity=274),
+                    dict(relaxation="linear", dr=140, signal_model="hollow-cylinder"),
+                    dict(r2prime_source="oracle")):
+            with pytest.raises(ValueError):
+                chisep.ChisepConfig(**bad)
+
+    def test_source_r2_makes_r2star_proportional_to_sources(self):
+        from qsm_forward import chisep
+        cfg = chisep.PRESETS["r2star-3t"]
+        chi_pos, chi_neg = np.array([0.0, 0.1, 0.02]), np.array([0.0, -0.03, -0.05])
+        r2 = chisep.source_r2(chi_pos, chi_neg, cfg)
+        r2p = qsm_forward.generate_r2prime(chi_pos, chi_neg, dr=cfg.dr)
+        np.testing.assert_allclose(r2 + r2p, 274.0 * (np.abs(chi_pos) + np.abs(chi_neg)), rtol=1e-6)
+
+    def test_generate_chisep_bids_wiring(self):
+        """End to end on a tiny tissue model: linear relaxation, source R2, fitted R2', sidecar."""
+        from qsm_forward import chisep
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, arrays = _tiny_chisep_tissue(tmp)
+            tp = qsm_forward.TissueParams(root_dir=tmp, **paths)
+            cfg = chisep.preset("r2star-3t", voxel=0.0, noiseless=True, anisotropic=False)
+            seg = arrays["seg"]
+            dr_pos, dr_neg = chisep.relaxivity_maps(seg, None, cfg)
+            maps = chisep.ChisepMaps(tp, arrays["chi_pos"], arrays["chi_neg"], None, dr_pos, dr_neg,
+                                     qsm_forward.generate_r2prime(arrays["chi_pos"], arrays["chi_neg"], dr=dr_pos, dr_neg=dr_neg))
+            written = chisep.generate_chisep_bids(tmp, os.path.join(tmp, "bids"), cfg, maps=maps)
+            sigma = np.abs(arrays["chi_pos"]) + np.abs(arrays["chi_neg"])
+            np.testing.assert_allclose(nib.load(written["r2"]).get_fdata(), (274.0 - cfg.dr) * sigma, rtol=1e-5)
+            np.testing.assert_allclose(nib.load(written["r2prime"]).get_fdata(), cfg.dr * sigma, rtol=1e-4, atol=1e-3)
+            np.testing.assert_allclose(nib.load(written["r2prime_formula"]).get_fdata(), cfg.dr * sigma, rtol=1e-5)
+            meta = json.load(open(written["metadata"]))
+            assert meta["Relaxivity"] == {"Model": "linear", "Dr": pytest.approx(cfg.dr), "R2starRelaxivity": 274.0}
+            assert meta["R2primeSource"] == "fitted" and meta["ChiSeparationPhantom"]["b0"] == 3.0
+
+    def test_cli_preset_reaches_generator(self):
+        from qsm_forward import chisep
+        with patch.object(chisep, "generate_chisep_bids", return_value={}) as gen, \
+                patch.object(sys, "argv", ["qsm-forward", "chi-sep", "data", "bids", "--preset", "chisep-mc",
+                                           "--r2prime-source", "fitted"]):
+            main()
+        cfg = gen.call_args.args[2]
+        assert cfg.signal_model == "hollow-cylinder" and cfg.r2prime_source == "fitted"

@@ -2,6 +2,7 @@
 
 import argparse
 import qsm_forward
+from qsm_forward import chisep
 import numpy as np
 
 
@@ -119,10 +120,26 @@ def main():
                                     "'scaled' uses the static-dephasing Dr+ = 107.84*B0 (Yablonskiy & Haacke 1994). Both keep the sin^2(theta) shape.")
     chisep_parser.add_argument('--isotropic', action='store_true', help='Disable WM anisotropy (constant Dr-)')
     chisep_parser.add_argument('--no-brain-mask', action='store_true', help='Do not restrict chi to the brain mask (simulate the whole head, with background field)')
+    chisep_parser.add_argument('--preset', choices=sorted(chisep.PRESETS), default=None,
+                               help='Named phantom configuration (field, echoes, resolution, relaxation, signal model, noise); '
+                                    'the acquisition and chi-sep options above are then ignored. See qsm_forward.chisep.')
+    chisep_parser.add_argument('--r2prime-source', choices=list(chisep.R2PRIME_SOURCES), default=None,
+                               help="With --preset: override what the shipped R2' holds ('formula': the imposed R2'; "
+                                    "'fitted': R2* - R2 fitted from the noiseless GRE and spin echo)")
+    chisep_parser.add_argument('--wm-rois', default=None,
+                               help='With --preset: white-matter label atlas on the native grid (e.g. Ridani WM_fibers_seg.nii.gz) '
+                                    'to resample into the derivatives')
 
     args = parser.parse_args()
 
     # ---- chi-separation phantom (Ridani et al. 2026) ----
+    if args.mode == 'chi-sep' and args.preset:
+        overrides = {} if args.r2prime_source is None else {"r2prime_source": args.r2prime_source}
+        written = chisep.generate_chisep_bids(args.data, args.bids, chisep.preset(args.preset, **overrides),
+                                              subject=args.subject, wm_rois=args.wm_rois)
+        for k, v in written.items():
+            print(f"  {k}: {v}")
+        return
     if args.mode == 'chi-sep':
         anisotropy = not args.isotropic
         tissue_params = qsm_forward.TissueParams(

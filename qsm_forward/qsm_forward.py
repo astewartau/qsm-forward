@@ -582,7 +582,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, dr_pos_map=None, dr_neg_map=None, chisep_signal=False, chisep_multicompartment=False, chisep_hc_b0=None, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False, r2prime_source="formula"):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -635,6 +635,16 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         magnitude decays with R2 (not R2*). Enables deriving R2' = R2* - R2 from
         an SE/GRE pair. Uses recon_params.se_TR and recon_params.se_TEs. Default
         is False.
+    r2prime_source : {"formula", "fitted"}
+        What the saved ``*_R2prime.nii`` holds when ``save_r2prime``. "formula"
+        (default) is the R2' the generator imposes (Dr+|chi+| + Dr-|chi-|, or the
+        multicompartment white-matter equivalent). "fitted" is what an R2* - R2
+        pipeline measures from the simulated data: mono-exponential (log-linear)
+        fits of the noiseless GRE magnitude over ``recon_params.TEs`` (R2*) and of
+        the noiseless spin echo over ``recon_params.se_TEs`` (R2), clamped at 0
+        (see :func:`fit_r2prime`). The spin echo is simulated for the fit even when
+        ``save_se`` is False (it is then not written). With "fitted", the formula
+        map is written as well, as ``*_desc-formula_R2prime.nii``.
 
     Returns
     -------
@@ -711,6 +721,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     print("Image-space cropping of segmentation...")
     if save_segmentation: nib.save(grid.resample_map(tissue_params.seg, 'nearest'), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_dseg.nii"))
 
+    if r2prime_source not in ("formula", "fitted"):
+        raise ValueError(f"r2prime_source must be 'formula' or 'fitted', got {r2prime_source!r}")
+    fit_r2p = save_r2prime and r2prime_source == "fitted"
+
     # chi-separation derivatives
     if save_chi_pos or save_chi_neg or save_r2prime:
         print("Computing chi-separation maps...")
@@ -753,7 +767,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
                     print("  Multi-compartment WM model: WM R2' = Dr+*|chi+| + hollow-cylinder pool interference")
             r2prime_nii = nib.Nifti1Image(dataobj=r2prime_data.astype(np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header)
             print("Image-space resizing of R2'...")
-            nib.save(grid.resample_map(r2prime_nii), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
+            # with r2prime_source="fitted" the signal-derived map takes the R2prime name (it
+            # is written after the signals are simulated) and the imposed one is kept beside it
+            r2p_name = f"{recon_name}_desc-formula_R2prime.nii" if fit_r2p else f"{recon_name}_R2prime.nii"
+            nib.save(grid.resample_map(r2prime_nii), filename=os.path.join(subject_dir_deriv, "anat", r2p_name))
 
     # calculate field
     print("Computing field model...")
@@ -789,7 +806,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
     theta_data = None
     wm_mask_data = None
 
-    if chisep_signal or save_se:
+    if chisep_signal or save_se or fit_r2p:
         print("Computing transverse relaxation (R2)...")
         # Compute or load R2
         if tissue_params.R2 is not None:
@@ -882,6 +899,11 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             if m.any():
                 R1_data[m] = R1_data[m] / factor
 
+    # signal-derived R2' (r2prime_source="fitted"): log-linear fits of the noiseless
+    # GRE and SE magnitudes, accumulated echo by echo on the acquired grid
+    gre_fit = MonoExponentialRateFit(recon_params.TEs) if fit_r2p else None
+    se_fit = MonoExponentialRateFit(recon_params.se_TEs) if fit_r2p else None
+
     # signal model
     multiecho = len(recon_params.TEs) > 1
     for i in range(len(recon_params.TEs)):
@@ -913,6 +935,8 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         print(f"k-space cropping of MR signal for echo {i+1}...")
         sigHR_cropped = grid.sample_signal(sigHR)
         del sigHR
+        if gre_fit is not None:
+            gre_fit.add(i, sigHR_cropped)
 
         # per-slice phase offsets: a property of the slice, not the echo, so the same
         # offsets go on every echo and a phase-vs-TE fit sees them only in the intercept
@@ -975,8 +999,9 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             with open(os.path.join(subject_dir, "anat", f"{phs_filename}.json"), 'w') as phs_json_file:
                 json.dump(json_dict_phs, phs_json_file)
 
-    # spin-echo signal (magnitude only; decays with R2, not R2*, and carries no susceptibility phase)
-    if save_se:
+    # spin-echo signal (magnitude only; decays with R2, not R2*, and carries no susceptibility phase).
+    # Simulated for the R2' fit even when it is not saved.
+    if save_se or fit_r2p:
         se_TEs = np.asarray(recon_params.se_TEs)
         se_TR = recon_params.se_TR
         multiecho_se = len(se_TEs) > 1
@@ -1020,6 +1045,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             print(f"k-space cropping of SE signal for echo {i+1}...")
             sigHR_cropped = grid.sample_signal(sigHR)
             del sigHR
+            if se_fit is not None:
+                se_fit.add(i, sigHR_cropped)
+            if not save_se:
+                continue
 
             # noise (complex noise -> Rician magnitude, matching the GRE path)
             if recon_params.random_seed is not None:
@@ -1060,6 +1089,12 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             }
             with open(os.path.join(subject_dir, "anat", f"{mag_filename}.json"), 'w') as se_json_file:
                 json.dump(json_dict, se_json_file)
+
+    if fit_r2p:
+        print("Fitting R2' = R2* - R2 from the noiseless GRE and SE signals...")
+        r2p_fit = _r2prime_from_fits(gre_fit, se_fit)
+        nib.save(nib.Nifti1Image(dataobj=r2p_fit.astype(np.float32), affine=chi_downsampled_nii.affine, header=chi_downsampled_nii.header),
+                 filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_R2prime.nii"))
 
     print(f"Generating details for BIDS datset_description.json...")
     dataset_description = {
@@ -1165,6 +1200,67 @@ def generate_r2prime(chi_pos, chi_neg, dr=DR_KERNEL, dr_neg=None):
     return dr * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)
 
 
+class MonoExponentialRateFit:
+    """Streaming mono-exponential decay-rate fit, one echo at a time.
+
+    The rate is the negated slope of an unweighted least-squares line through
+    ln|S(TE)| against TE, so for a noiseless mono-exponential signal it is exact,
+    and for any other decay it is what a log-linear R2* (or R2) fit returns over
+    the same echo times. Only two running sums are kept, so a whole-head
+    multi-echo series never has to be held in memory. Voxels where any echo has
+    no signal (|S| <= ``floor``) are reported as invalid."""
+
+    def __init__(self, TEs, floor=1e-12):
+        self.TEs = np.asarray(TEs, dtype=float)
+        if self.TEs.size < 2:
+            raise ValueError("a decay-rate fit needs at least two echo times")
+        self._t = self.TEs - self.TEs.mean()
+        self._floor = floor
+        self._acc = None
+        self._valid = None
+        self._n = 0
+
+    def add(self, i, magnitude):
+        """Add echo ``i``'s magnitude (any array shape, the same for every echo)."""
+        mag = np.abs(np.asarray(magnitude))
+        ok = mag > self._floor
+        term = np.log(np.where(ok, mag, 1.0)) * self._t[i]
+        if self._acc is None:
+            self._acc, self._valid = term, ok
+        else:
+            self._acc = self._acc + term
+            self._valid = self._valid & ok
+        self._n += 1
+
+    def rate(self):
+        """Fitted decay rate (Hz) and the validity mask; 0 where invalid."""
+        if self._n != self.TEs.size:
+            raise ValueError(f"expected {self.TEs.size} echoes, got {self._n}")
+        r = -self._acc / (self._t ** 2).sum()
+        return np.where(self._valid, r, 0.0), self._valid
+
+
+def fit_r2prime(gre_magnitudes, gre_TEs, se_magnitudes, se_TEs):
+    """R2' = R2* - R2 from mono-exponential (log-linear) fits of a multi-echo
+    gradient echo (R2*) and a multi-echo spin echo (R2), each over its own echo
+    times. Magnitudes are sequences of arrays, one per echo. Returns R2' in Hz,
+    clamped at 0 (R2' is a non-negative rate) and 0 wherever either series has an
+    echo without signal."""
+    gre = MonoExponentialRateFit(gre_TEs)
+    for i, m in enumerate(gre_magnitudes):
+        gre.add(i, m)
+    se = MonoExponentialRateFit(se_TEs)
+    for i, m in enumerate(se_magnitudes):
+        se.add(i, m)
+    return _r2prime_from_fits(gre, se)
+
+
+def _r2prime_from_fits(gre_fit, se_fit):
+    r2star, ok_gre = gre_fit.rate()
+    r2, ok_se = se_fit.rate()
+    return np.where(ok_gre & ok_se, np.maximum(r2star - r2, 0.0), 0.0)
+
+
 def generate_t2_map(seg, R2star, M0, B0=7, t2_params=None, gaussian_sigma=0.2):
     """
     Simulate a T2 map from tissue segmentation and compute R2 = 1/T2.
@@ -1229,18 +1325,18 @@ def generate_t2_map(seg, R2star, M0, B0=7, t2_params=None, gaussian_sigma=0.2):
     T2_smoothed = gaussian_filter(T2_textured, sigma=gaussian_sigma)
     T2_smoothed = np.maximum(T2_smoothed, 0)  # Clamp: smoothing can produce negatives at boundaries
 
-    # Scale for 3T if needed
-    if B0 == 3:
-        T2_smoothed = T2_smoothed / 0.65
-
-    # Compute R2 = 1000 / T2 (ms to Hz), only where T2 > 0
+    # Compute R2 = 1000 / T2 (ms to Hz) at 7T, only where T2 > 0, and drop the
+    # implausible R2 > 300 Hz voxels (T2_simulation.m)
     R2 = np.zeros_like(T2_smoothed)
     valid = T2_smoothed > 0
     R2[valid] = 1000.0 / T2_smoothed[valid]
     R2[R2 > 300] = 0
 
-    # Scale R2 for 3T
+    # Scale for 3T once: the reference saves T2_3T = T2/0.65 (T2_simulation.m) and
+    # simulates the 3T GRE with R2*0.65 (GRESimulation.m), which are the same scaling
+    # (1000/(T2/0.65) = 0.65*R2). Applying both to R2 would give 0.4225*R2_7T.
     if B0 == 3:
+        T2_smoothed = T2_smoothed / 0.65
         R2 = R2 * 0.65
 
     return T2_smoothed, R2

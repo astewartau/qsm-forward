@@ -292,6 +292,26 @@ qsm-forward chi-sep ~/data bids --B0 7 --voxel-size 1 1 1 --peak-snr 100 --save-
 # --no-brain-mask              simulate the whole head (keep the background field)
 ```
 
+### Named chi-separation phantoms
+
+`qsm-forward chi-sep DATA BIDS --preset NAME` (or `qsm_forward.chisep.generate_chisep_bids` in Python) builds a complete phantom from one named configuration. All presets share the same Ridani χ⁺/χ⁻ anatomy; they differ in how the sources relax, the signal model and the protocol.
+
+| Preset | B0 | Voxel | GRE echoes (ms) | Spin echo | Noise | Relaxation (R2′) | R2 | Shipped R2′ |
+|---|---|---|---|---|---|---|---|---|
+| `ridani-3t-iso` | 3 T | 0.64 mm | 3:4:23 | – | none | region-disjoint, Dr⁺ = 107.84·B0, Dr⁻ = 700.8·B0/7 | tissue | formula |
+| `ridani-3t-aniso` | 3 T | 0.64 mm | 3:4:23 | – | none | region-disjoint, Dr⁻ = 133.77·B0·sin²θ | tissue | formula |
+| `ridani-7t-aniso` | 7 T | 0.64 mm | 4:8:28 | – | none | as above at 7 T | tissue | formula |
+| `chisep-mc` | 7 T | 1 mm | 3:6:45 | 10:20:70 | SNR 100 | region-disjoint, Dr⁺ = 320; hollow-cylinder white matter | tissue | formula |
+| `linear-3t-dr142` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, R2′ = 141.7·(\|χ⁺\| + \|χ⁻\|) (137·B0/2.9) | tissue | fitted |
+| `linear-3t-dr114` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 114 | tissue | fitted |
+| `linear-3t-dr324` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 323.5 (2πγB0/(9√3)) | tissue | fitted |
+| `r2star-3t` | 3 T | 1 mm | 5:5:30 | 10:20:70 | SNR 100 | co-located, Dr = 141.7 | (274 − Dr)·(\|χ⁺\| + \|χ⁻\|) | fitted |
+
+- **Region-disjoint** (Ridani et al., 2026): only χ⁺ relaxes outside white matter and only χ⁻ inside it. **Co-located**: both sources relax in every voxel with one relaxivity, mono-exponential, phase linear in TE.
+- `r2star-3t` makes R2\* = 274·(|χ⁺| + |χ⁻|) hold exactly (Dimov et al., 2022). Its R2 is zero wherever there is no source (e.g. CSF), which is not physical.
+- **Shipped R2′.** *formula* is the R2′ the generator imposes. *fitted* is R2\* − R2 from log-linear fits of the noiseless GRE and spin echo over the protocol's echo times (the spin echo is simulated for the fit even when it is not saved). With *fitted*, the formula map is also written as `*_desc-formula_R2prime.nii`. `--r2prime-source` overrides a preset's choice.
+- Each phantom writes `*_chisep.json` next to its derivatives: the configuration and the relaxivity it imposes.
+
 The Python `generate_bids(...)` example below shows the lower-level API (a single Dr kernel, no orientation dependence); the `chi-sep` subcommand wraps `generate_dr_maps_ridani` to build the source- and orientation-dependent relaxivity described later.
 
 ```python
@@ -412,6 +432,7 @@ If you use qsm-forward, please cite this repository and the head phantom (Marque
 - **Static-dephasing regime (single-kernel rationale).** Yablonskiy D.A., Haacke E.M. *Theory of NMR signal behavior in magnetically inhomogeneous tissues: the static dephasing regime.* Magnetic Resonance in Medicine 1994;32(6):749–763. doi:[10.1002/mrm.1910320610](https://doi.org/10.1002/mrm.1910320610).
 - **Multi-compartment / signal-domain separation (DECOMPOSE).** Chen J., et al. *Decompose quantitative susceptibility mapping (QSM) to sub-voxel diamagnetic and paramagnetic components based on gradient-echo MRI data.* NeuroImage 2021. doi:[10.1016/j.neuroimage.2021.118735](https://doi.org/10.1016/j.neuroimage.2021.118735).
 - **Hollow-cylinder white-matter signal (`chisep_multicompartment`).** Wharton S., Bowtell R. *Fiber orientation-dependent white matter contrast in gradient echo MRI.* PNAS 2012;109(45):18559–18564. doi:[10.1073/pnas.1211075109](https://doi.org/10.1073/pnas.1211075109).
+- **χ-sepnet relaxivity (`linear-3t-dr114`).** Kim M., et al. *χ-sepnet: Deep neural network for magnetic susceptibility source separation.* Human Brain Mapping 2025;46(4):e70136. doi:[10.1002/hbm.70136](https://doi.org/10.1002/hbm.70136).
 - **κ (R2\*/R2′) relaxometric constant.** Dimov A.V., Gillen K.M., Nguyen T.D., et al. *Magnetic susceptibility source separation solely from gradient echo data: histological validation.* Tomography 2022;8(3):1544–1551. doi:[10.3390/tomography8030127](https://doi.org/10.3390/tomography8030127).
 - **Spin-echo forward model (`save_se`).** Stoll P. *Development of a Deep Learning Framework for Iron and Myelin Mapping from Quantitative Susceptibility Maps.* MSc thesis, ETH Zurich, 2025.
 
