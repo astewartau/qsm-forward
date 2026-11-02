@@ -180,3 +180,40 @@ def test_subvoxel_field_is_the_weighted_phase_slope():
     f = chisep.subvoxel_field(Fake(), TES, 3.0, None)
     np.testing.assert_allclose(f[Fake.mask], 0.01, rtol=1e-6)
     assert np.all(f[~Fake.mask] == 0)
+
+
+def test_echo_drift_wiring():
+    gt, acq = _phantom()
+    gt["chimap_echoes"] = np.repeat(gt["chimap"][..., None], len(TES), -1)
+    p = degrade.DegradationParams(noise=False, echo_drift_b0=(3.0, 7.0), echo_drift_te_ms=((4.0, 16.0), (4.0, 16.0)),
+                                  echo_drift_common_ppm=((0.01, -0.01), (0.0, 0.0)),
+                                  echo_drift_echo_ppm=((0.0, 0.0), (0.0, 0.002)), echo_drift_width_mm=2.0)
+    common, own = degrade.echo_drift_profile(TES, 3.0, p)
+    np.testing.assert_allclose(common, [0.01, 1 / 300, -1 / 300, -0.01])     # 3 T table, interpolated in TE
+    np.testing.assert_allclose(own, 0.0)
+    assert degrade.echo_drift_profile(TES, 6.5, p)[1][-1] == pytest.approx(0.002)  # nearest table: 7 T
+    a = degrade.degrade(gt, acq, p, seed=1)
+    base = degrade.degrade(gt, acq, degrade.DegradationParams(noise=False), seed=1)
+    m = base["mask"] > 0
+    d = a["chimap_echoes"] - base["chimap_echoes"]
+    # one shared pattern, the signed amplitude per echo; χ, field and the per-echo maps' rest untouched
+    np.testing.assert_allclose(d[..., 0], -d[..., 3], atol=1e-12)
+    assert np.sqrt(np.mean(d[..., 0][m] ** 2)) == pytest.approx(0.01, rel=1e-6)
+    np.testing.assert_array_equal(a["chimap"], base["chimap"])
+    np.testing.assert_array_equal(a["localfield"], base["localfield"])
+    np.testing.assert_array_equal(degrade.degrade(gt, acq, p, seed=1)["chimap_echoes"], a["chimap_echoes"])
+    assert degrade.level_params("L3").echo_drift_b0 == (3.0, 7.0) and not degrade.level_params("L2").echo_drift_b0
+    with pytest.raises(ValueError):
+        degrade.DegradationParams(echo_drift_b0=(3.0,), echo_drift_te_ms=((4.0, 2.0),),
+                                  echo_drift_common_ppm=((0.0, 0.0),), echo_drift_echo_ppm=((0.0, 0.0),))
+
+
+def test_phantom_echoes_skip_the_subvoxel_term():
+    gt, acq = _phantom()
+    rep_e = np.repeat(gt["chimap"][..., None], len(TES), -1)
+    sub = np.where(gt["mask"], 0.01, 0.0)
+    p = degrade.DegradationParams(subvoxel_frequency=True)
+    run = lambda **kw: degrade.degrade(dict(gt, **kw), acq, p, seed=0)["chimap_echoes"]
+    # χ repeated gets the sub-voxel frequency through H/D; a phantom's own χ(TE) already holds it
+    assert np.abs(run(subvoxel_field=sub) - run()).max() > 1e-4
+    np.testing.assert_array_equal(run(subvoxel_field=sub, chimap_echoes=rep_e), run(chimap_echoes=rep_e))

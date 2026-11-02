@@ -34,7 +34,14 @@ Levels (:data:`LEVELS`, parameters in :data:`LEVEL_PARAMS`):
 
 The per-echo χ (``Chimap-echoes``) gets the same transfer and additive terms and its own echo's
 phase noise: the ground truth's echo dependence passes the same transfer as χ (unchanged where the
-transfer is the identity) and the noise grows at short echo times, as in per-echo QSM.
+transfer is the identity) and the noise grows at short echo times, as in per-echo QSM. When the
+phantom has its own χ(TE) (``*_Chimap-echoes``), each echo of it is degraded, without the sub-voxel
+frequency term (that χ(TE) already holds the sub-voxel phase as a per-echo reconstruction sees it);
+otherwise χ repeated is. L3 adds a smooth per-echo drift, the TE-dependent bias real per-echo
+pipelines show (regularisation and background removal act differently at each echo's phase SNR and
+scale): one smooth random pattern (Gaussian-smoothed white noise, ``echo_drift_width_mm``) times a
+signed amplitude per echo interpolated in B0·TE (``echo_drift_nodes``/``echo_drift_ppm``),
+calibrated to the median echo dependence of real per-echo QSMxT pipelines (see LEVEL_PARAMS).
 
 k is in cycles/mm, psi is the angle between k and B0. The level parameters were calibrated on real
 QSM pipelines (QSMxT: iLSQR, TKD, NLTV, MEDI, TFI, iR2QSM; the median across pipelines) run on the
@@ -93,6 +100,12 @@ class DegradationParams:
     mask_erosion_mm: float = 0.0       # erosion of the brain mask (background-field removal)
     edge_error_ppm: float = 0.0        # RMS of the extra χ error at the (eroded) mask boundary
     edge_error_width_mm: float = 3.0   # its e-folding distance into the brain
+    # per-echo drift (L3): one table per field strength, interpolated in TE (nearest field's table)
+    echo_drift_b0: tuple = ()          # field strengths (T) of the tables
+    echo_drift_te_ms: tuple = ()       # per table: TE nodes (ms)
+    echo_drift_common_ppm: tuple = ()  # per table: signed amplitude (ppm RMS) of the pattern shared by all echoes
+    echo_drift_echo_ppm: tuple = ()    # per table: amplitude (ppm RMS) of each echo's own pattern
+    echo_drift_width_mm: float = 6.0   # Gaussian smoothing sigma of the drift patterns
     r2_fit: str = "arlo"               # R2* and R2 fit: "arlo" | "loglinear"
 
     def __post_init__(self):
@@ -107,6 +120,12 @@ class DegradationParams:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.cone_lambda < 0 or self.mask_erosion_mm < 0 or self.background_poly_order < 0:
             raise ValueError("cone_lambda, mask_erosion_mm and background_poly_order must be >= 0")
+        n = len(self.echo_drift_b0)
+        if not (len(self.echo_drift_te_ms) == len(self.echo_drift_common_ppm) == len(self.echo_drift_echo_ppm) == n):
+            raise ValueError("echo_drift_b0/_te_ms/_common_ppm/_echo_ppm need one entry per table")
+        for t, c, e in zip(self.echo_drift_te_ms, self.echo_drift_common_ppm, self.echo_drift_echo_ppm):
+            if not (len(t) == len(c) == len(e)) or (len(t) > 1 and np.any(np.diff(t) <= 0)):
+                raise ValueError("each echo-drift table needs increasing TE nodes and one amplitude per node")
 
 
 # Calibrated on real pipelines (see the module docstring): the median across iLSQR, TKD, NLTV, MEDI,
@@ -121,11 +140,46 @@ _TRANSFER = dict(subvoxel_frequency=True, field_lowk_loss=0.958, field_lowk_widt
 _ADDITIVE = dict(reference='mean', chi_offset_ppm=0.0, background_poly_order=2,
                  background_field_ppm=0.0005975, background_chi_ppm=0.001379, mask_erosion_mm=2.0,
                  edge_error_ppm=0.02283, edge_error_width_mm=3.021)
+# Per-echo drift (L3), calibrated on the real per-echo pipelines (QSMxT 9cfe3f9 --qsm-per-echo: STAR,
+# STAR + Laplacian unwrapping, iLSQR, TKD, RTS, TV, NLTV, MEDI, TFI, iR2QSM, xQSM; median over the 11)
+# on meso-3t (3 T table) and wm-micro-7t (7 T table): per echo, the SD of the smooth part (Gaussian,
+# sigma 3 voxels) of χ(TE) - mean_e χ that L3 lacks (median² - L3²), split into a pattern shared by all
+# echoes (the real residual's first principal component across echoes, 90 % / 66 % of its variance at
+# 3 T / 7 T) and each echo's own pattern. The width is the one whose smooth/fine SD ratio is closest to
+# the real residual's (6 mm at 3 T, 2-3 mm at 7 T; 4 mm for both). Other protocols take the nearest
+# field's table, interpolated in TE (an extrapolation of the calibration).
+_ECHO_DRIFT = dict(
+    echo_drift_b0=(3.0, 7.0),
+    echo_drift_te_ms=((2.7, 5.6, 8.5, 11.4, 14.3, 17.2, 20.1, 23.0, 25.9, 28.8, 31.7, 34.6, 37.5, 40.4, 43.3, 46.2),
+                      (3.0, 9.0, 15.0, 21.0, 27.0, 33.0, 39.0, 45.0)),
+    echo_drift_common_ppm=((0.02257, 0.007228, 0.001432, 7.725e-05, 7.725e-05, 7.725e-05, -0.001847, -0.002287,
+                            -0.002634, -0.002984, -0.003206, -0.003417, -0.003575, -0.003765, -0.003825, -0.003924),
+                           (0.008365, 0.007494, 0.00634, 0.004934, -0.0005987, -0.002867, -0.008488, -0.01518)),
+    echo_drift_echo_ppm=((0.005432, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0002568, 0.0005136, 0.001116, 0.00106, 0.001067,
+                          0.002022, 0.002006, 0.003273, 0.004555, 0.005815),
+                         (0.007429, 0.0, 0.002421, 0.002849, 0.008545, 0.006948, 0.006557, 0.00816)),
+    echo_drift_width_mm=4.0)
+# Spread of that target across the 11 pipelines (smooth-part SD of χ(TE) - mean χ, ppm, per TE).
+ECHO_DRIFT_SPREAD = {
+    "metric": "SD over the brain of the sigma-3-voxel smooth part of chi(TE) - mean_e chi (ppm)",
+    "3.0": {"te_ms": [2.7, 5.6, 8.5, 11.4, 14.3, 17.2, 20.1, 23.0, 25.9, 28.8, 31.7, 34.6, 37.5, 40.4, 43.3, 46.2],
+            "median": [0.0191, 0.00716, 0.00347, 0.00191, 0.00146, 0.00182, 0.00225, 0.0025, 0.00272, 0.00287, 0.00296, 0.0033, 0.00336, 0.0039, 0.0045, 0.00517],
+            "q1": [0.0138, 0.00587, 0.00307, 0.00175, 0.00142, 0.00154, 0.00183, 0.0021, 0.00229, 0.00249, 0.00258, 0.0027, 0.00291, 0.00325, 0.00365, 0.0043],
+            "q3": [0.0272, 0.00905, 0.00434, 0.00234, 0.00215, 0.0024, 0.00268, 0.0031, 0.00346, 0.00377, 0.00401, 0.00421, 0.00448, 0.00485, 0.00558, 0.00613],
+            "min": [0.00993, 0.00474, 0.00237, 0.00122, 0.00102, 0.0012, 0.00125, 0.00144, 0.00164, 0.00185, 0.00197, 0.00209, 0.00224, 0.00236, 0.00246, 0.00269],
+            "max": [0.426, 0.149, 0.0601, 0.0184, 0.00761, 0.0248, 0.0367, 0.0458, 0.0529, 0.0585, 0.0633, 0.0673, 0.0705, 0.0735, 0.0759, 0.0782]},
+    "7.0": {"te_ms": [3.0, 9.0, 15.0, 21.0, 27.0, 33.0, 39.0, 45.0],
+            "median": [0.00885, 0.00597, 0.00542, 0.00471, 0.0059, 0.00537, 0.00787, 0.0127],
+            "q1": [0.00775, 0.00499, 0.00467, 0.00413, 0.00497, 0.00451, 0.00646, 0.0102],
+            "q3": [0.0108, 0.00657, 0.00594, 0.00538, 0.00634, 0.00558, 0.0082, 0.0136],
+            "min": [0.00556, 0.00306, 0.00299, 0.00319, 0.00367, 0.00373, 0.00467, 0.00723],
+            "max": [0.156, 0.0235, 0.0167, 0.024, 0.0302, 0.0359, 0.0419, 0.0508]},
+}
 LEVEL_PARAMS = {
     "L0": DegradationParams(noise=False),
     "L1": DegradationParams(**_NOISE),
     "L2": DegradationParams(**_NOISE, **_TRANSFER),
-    "L3": DegradationParams(**_NOISE, **_TRANSFER, **_ADDITIVE),
+    "L3": DegradationParams(**_NOISE, **_TRANSFER, **_ADDITIVE, **_ECHO_DRIFT),
 }
 # Range of each calibrated parameter across the six pipelines (levels can bracket it).
 CALIBRATION_SPREAD = {
@@ -379,6 +433,32 @@ def edge_error(mask, voxel, rms, width_mm, rng, smooth_mm=2.0):
     return out
 
 
+def echo_drift_profile(tes_s, b0, p: "DegradationParams"):
+    """(common, own): the signed amplitude of the shared drift pattern and the amplitude of each
+    echo's own pattern (ppm RMS over the mask) at each echo: the table of the nearest field strength,
+    interpolated linearly in TE and held at its end values outside it. Zeros without tables."""
+    tes = np.asarray(tes_s, float) * 1e3
+    if not p.echo_drift_b0:
+        return np.zeros(len(tes)), np.zeros(len(tes))
+    k = int(np.argmin(np.abs(np.asarray(p.echo_drift_b0, float) - b0)))
+    t = np.asarray(p.echo_drift_te_ms[k], float)
+    return (np.interp(tes, t, np.asarray(p.echo_drift_common_ppm[k], float)),
+            np.interp(tes, t, np.asarray(p.echo_drift_echo_ppm[k], float)))
+
+
+def echo_drift_pattern(mask, voxel, width_mm, rng):
+    """The drift's spatial pattern: Gaussian-smoothed white noise (sigma ``width_mm``), zero mean
+    and unit RMS over ``mask``, zero outside."""
+    m = mask > 0
+    out = np.zeros(mask.shape)
+    if not m.any():
+        return out
+    v = ndimage.gaussian_filter(rng.standard_normal(mask.shape), width_mm / np.asarray(voxel, float))
+    v = v[m] - v[m].mean()
+    out[m] = v / max(np.sqrt(np.mean(v ** 2)), 1e-30)
+    return out
+
+
 def erode_mask(mask, mm, voxel):
     """Erode by a ball of radius ``mm``."""
     m = mask > 0
@@ -442,14 +522,26 @@ def degrade(gt: dict, acq: dict, p: DegradationParams, seed: int = 0) -> dict:
         chi = chi + noise_part(n_f)
     echoes = None
     if "chimap_echoes" in gt or p.noise:
-        ge = gt.get("chimap_echoes")
-        if ge is None:
-            ge = np.repeat(np.asarray(gt["chimap"], float)[..., None], len(tes), -1)
+        own = gt.get("chimap_echoes") is not None
+        ge = gt["chimap_echoes"] if own else np.repeat(np.asarray(gt["chimap"], float)[..., None], len(tes), -1)
         echoes = chi_part(np.asarray(ge, float))
-        if chi_sub is not None:
+        # A phantom's own χ(TE) (``Chimap-echoes``) already holds the sub-voxel phase, seen through a
+        # per-echo reconstruction (STAR(echo) - STAR_ref(echo)); adding the sub-voxel frequency again
+        # would count it twice. Only the repeated χ gets it.
+        if chi_sub is not None and not own:
             echoes = echoes + chi_sub[..., None]
         if p.noise:
             echoes = echoes + noise_part(n_e)
+        if p.echo_drift_b0:
+            # per-echo drift of real per-echo pipelines (TE-dependent regularisation and background
+            # removal at each echo's phase SNR): a smooth pattern shared by all echoes with a signed
+            # amplitude per echo, plus each echo's own smooth pattern (calibrated, see LEVEL_PARAMS)
+            rng_d = np.random.default_rng([seed, 3])
+            common, own = echo_drift_profile(tes, acq["b0"], p)
+            phi = echo_drift_pattern(out_mask, voxel, p.echo_drift_width_mm, rng_d)
+            echoes = echoes + phi[..., None] * common
+            for e in range(len(tes)):
+                echoes[..., e] += own[e] * echo_drift_pattern(out_mask, voxel, p.echo_drift_width_mm, rng_d)
 
     # L3: additive low-order errors, then the reference (pipelines pin χ's zero last)
     if p.background_poly_order and (p.background_field_ppm > 0 or p.background_chi_ppm > 0):
@@ -646,6 +738,7 @@ def degrade_bids(bids_dir, levels=("L1", "L2", "L3"), subject="1", seed=None, ov
         side = {"DegradationLevel": level, "Seed": int(seed), "Parameters": asdict(p),
                 "QsmForwardVersion": get_version(), "Calibration": CALIBRATION_SOURCE,
                 "CalibrationSpread": _active_spread(p),
+                **({"EchoDriftCalibration": ECHO_DRIFT_SPREAD} if p.echo_drift_b0 else {}),
                 "NoiseSD": {"PeakSNR": acq["peak_snr"],
                             "FieldPpmMedian": _median_field_sd(acq, gt["mask"]) if p.noise else 0.0},
                 "Inputs": {k: os.path.basename(v) for k, v in paths.items()},
@@ -677,5 +770,6 @@ def _describe(level, p):
              "L2": "L1 + the linear transfer of real QSM pipelines (low-|k| loss of the field step; "
                    "magic-cone attenuation, low-|k| loss and smoothing of the inversion)",
              "L3": "L2 + low-order additive errors (χ mean reference and the matching harmonic field, "
-                   "residual smooth backgrounds, brain-mask erosion)"}
+                   "residual smooth backgrounds, brain-mask erosion) and, in the per-echo χ, the smooth "
+                   "per-echo drift of real per-echo pipelines"}
     return parts.get(level, "custom")

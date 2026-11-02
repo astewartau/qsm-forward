@@ -84,6 +84,33 @@ CHISEP_TISSUE_PARAMS = {
     16: (0.0,           0.0,           0.0,       0.0,                     0.0,       0.0),                      # Calcification
 }
 
+# Calcification (label 16). Ridani et al.'s SusceptibilityValues.mat sets chipos = chineg = 0 for it
+# (their PhantomCreationFunction.m loops over all 16 labels, so their published phantom has no
+# calcification either), and CHISEP_TISSUE_PARAMS above keeps that table as published. The QSM
+# Challenge 2.0 head the chi-sep phantoms are built on does have one: Marques et al. 2021
+# (doi:10.1002/mrm.28716), Table 1, "Calcification": mean susceptibility -3.300 ppm in Model 1 (the
+# model with the calcification, SIM2; Model 2 sets it to 0.019 ppm, i.e. no calcification), made
+# piece-wise constant (Sec. 2.4: no susceptibility map outside the brain to derive a texture from).
+# Restoring it is a documented DEVIATION from Ridani's table: a purely diamagnetic source,
+# chi- = -3.3 ppm, chi+ = 0, no R1/R2* modulation (piece-wise constant, as in the challenge).
+# Label 16 takes the non-brain branch of the build (prob-weighted, no smoothing of its own), so a
+# calcification voxel gets (1 - smoothed brain-tissue probability) x -3.3 ppm, as in the
+# challenge's own ChiModelMIX.nii (median -2.66 ppm over the 72 native voxels there).
+# :func:`chisep_tissue_params` applies it; qsm_forward.chisep switches it on per preset
+# (``ChisepConfig.calcification``) and keeps the Ridani presets as published.
+CALCIFICATION_LABEL = 16
+CALCIFICATION_CHI_PPM = -3.3
+
+
+def chisep_tissue_params(calcification=False):
+    """Per-tissue chi-sep parameters: CHISEP_TISSUE_PARAMS (Ridani et al. 2026, as published), with the
+    calcification restored as a chi- source of CALCIFICATION_CHI_PPM (Marques et al. 2021, Table 1)
+    when ``calcification`` is True."""
+    params = dict(CHISEP_TISSUE_PARAMS)
+    if calcification:
+        params[CALCIFICATION_LABEL] = (0.0, CALCIFICATION_CHI_PPM, 0.0, 0.0, 0.0, 0.0)
+    return params
+
 # -----------------------------------------------------------------------------
 # Susceptibility -> R2' relaxivity ("magnitude decay kernel", D_r).
 #
@@ -245,6 +272,10 @@ class TissueParams:
     chi_neg : str or ndarray or None
         Optional path or array for diamagnetic susceptibility (chi-, <= 0).
         If None, derived from chi as min(0, chi).
+    chisep_tissue_params : dict or None
+        Per-tissue parameters of the chi-sep build (generate_chisep_maps); None is
+        CHISEP_TISSUE_PARAMS (Ridani et al. 2026 as published, no calcification).
+        ``chisep_tissue_params(calcification=True)`` restores the calcification.
     """
 
     def __init__(
@@ -268,6 +299,7 @@ class TissueParams:
             white_matter_mask = "masks/white_matter_mask.nii.gz",
             chisep_anisotropy = False,
             chisep_apply_brain_mask = True,
+            chisep_tissue_params = None,
     ):
         if isinstance(chi, str) and not os.path.exists(os.path.join(root_dir, chi)):
             raise ValueError(f"Path to chi is invalid! ({os.path.join(root_dir, chi)})")
@@ -291,6 +323,7 @@ class TissueParams:
         self._white_matter_mask = os.path.join(root_dir, white_matter_mask) if isinstance(white_matter_mask, str) and os.path.exists(os.path.join(root_dir, white_matter_mask)) else white_matter_mask if not isinstance(white_matter_mask, str) else None
         self._chisep_anisotropy = chisep_anisotropy
         self._chisep_apply_brain_mask = chisep_apply_brain_mask
+        self._chisep_tissue_params = chisep_tissue_params
         self._apply_mask = apply_mask
         self._voxel_size = voxel_size
         self._affine = None
@@ -422,6 +455,7 @@ class TissueParams:
             voxel_size=self.voxel_size,
             v1_map=v1_data, wm_tract_mask=wm_tract_data, anisotropy=anisotropy,
             apply_brain_mask=bool(self._chisep_apply_brain_mask),
+            tissue_params=self._chisep_tissue_params,
         )
         self._cached_chi_pos = nib.Nifti1Image(cp, affine=self.nii_affine, header=self.nii_header)
         self._cached_chi_neg = nib.Nifti1Image(cn, affine=self.nii_affine, header=self.nii_header)
