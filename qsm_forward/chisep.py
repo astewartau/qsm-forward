@@ -504,14 +504,22 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         return resize(nii, voxel, interp).get_fdata().astype(np.float32)
 
     chi_pos = ds(maps.chi_pos)
-    chi_neg = ds(maps.chi_neg)
+    if config.calcification:
+        # the tissue's and the calcification's χ- are resampled separately (the resampling is not
+        # linear: it removes Gibbs ringing) and χ- is their sum, so tissue + calcification = χ- exactly
+        calc_native = calcification_component(maps)
+        chi_neg_tissue = ds(maps.chi_neg - calc_native)
+        chi_calc = ds(calc_native)
+        # interpolation spreads ppb-level tails over the grid: below CALC_MIN_PPM they count as tissue
+        keep = chi_calc < -CALC_MIN_PPM
+        chi_neg_tissue = np.where(keep, chi_neg_tissue, chi_neg_tissue + chi_calc).astype(np.float32)
+        chi_calc = np.where(keep, chi_calc, 0.0).astype(np.float32)
+        chi_neg = (chi_neg_tissue + chi_calc).astype(np.float32)
+    else:
+        chi_neg = ds(maps.chi_neg)
+        chi_calc = np.zeros_like(chi_neg)
+        chi_neg_tissue = chi_neg
     chi_total = chi_pos + chi_neg
-    # the calcification's χ- on the simulation grid (partial volume included); the tissue's χ- is the rest
-    chi_calc = np.minimum(ds(calcification_component(maps)), 0.0) if config.calcification else np.zeros_like(chi_neg)
-    chi_calc = np.maximum(chi_calc, np.minimum(chi_neg, 0.0))   # never more than the voxel's χ-
-    # interpolation spreads ppb-level tails over the grid: below CALC_MIN_PPM they stay tissue χ-
-    chi_calc = np.where(chi_calc < -CALC_MIN_PPM, chi_calc, 0.0).astype(np.float32)
-    chi_neg_tissue = chi_neg - chi_calc
     if config.relaxation == "linear":
         # a constant map: build it on the simulation grid rather than interpolate it there
         dr_pos = dr_neg = np.full(chi_pos.shape, config.dr, np.float32)
