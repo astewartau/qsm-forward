@@ -308,12 +308,17 @@ class TestChisepIntegration:
             with pytest.raises(ValueError):
                 chisep.ChisepConfig(**bad)
 
-    def test_mesoscopic_end_to_end(self, luts):
+    def test_mesoscopic_end_to_end(self, luts, monkeypatch):
+        monkeypatch.setattr(meso, "QsmrsTools", FakeTools)
         with tempfile.TemporaryDirectory() as tmp:
             tp, arrays, theta = _tiny(tmp)
             cfg = chisep.preset("meso-3t", voxel=0.0, noiseless=True, tes_ms=(5, 10, 20, 30))
+            FakeTools.calls = 0
             written = chisep.generate_chisep_bids(tmp, os.path.join(tmp, "bids"), cfg,
                                                   maps=_maps(tp, arrays, theta, cfg))
+            assert FakeTools.calls == 8                                   # 4 echoes + 4 references
+            ce = nib.load(written["chimap_echoes"]).get_fdata()
+            assert ce.shape == arrays["seg"].shape + (4,) and np.all(np.isfinite(ce))
             anat = os.path.dirname(written["metadata"])
             ld = lambda n: nib.load(os.path.join(anat, f"sub-1_{n}.nii")).get_fdata()
             wm = arrays["seg"] == 8
@@ -357,6 +362,49 @@ class TestChisepIntegration:
             assert src["Brain"]["n"] == int(brain.sum())
             # in range wherever the fraction cap does not bind: no source phase over π at TE_max
             assert src["Brain"]["either_over_phase_limit"] <= src["Brain"]["flag_above_cap"] + src["Brain"]["flag_clipped"]
+
+    def test_calcification_wiring(self, luts, monkeypatch):
+        monkeypatch.setattr(meso, "QsmrsTools", FakeTools)
+        with tempfile.TemporaryDirectory() as tmp:
+            tp, arrays, theta = _tiny(tmp)
+            calc = np.zeros(arrays["seg"].shape, bool)
+            calc[6:8, 6:8, 6:8] = True
+            arrays["seg"][calc] = qsm_forward.qsm_forward.CALCIFICATION_LABEL
+            arrays["chi_pos"][calc], arrays["chi_neg"][calc] = 0.0, -3.0
+            nib.save(nib.Nifti1Image(arrays["seg"].astype(np.float32), np.eye(4)), os.path.join(tmp, "seg.nii.gz"))
+            tp = qsm_forward.TissueParams(root_dir=tmp, chi="chi.nii.gz", M0="M0.nii.gz", R1="R1.nii.gz",
+                                          R2star="R2star.nii.gz", mask="mask.nii.gz", seg="seg.nii.gz")
+            tes = (5, 10, 20, 30)
+            cfg = chisep.preset("meso-3t", voxel=0.0, noiseless=True, tes_ms=tes, chimap_echoes=False)
+            assert cfg.calcification
+            written = chisep.generate_chisep_bids(tmp, os.path.join(tmp, "bids"), cfg,
+                                                  maps=_maps(tp, arrays, theta, cfg))
+            anat = os.path.dirname(written["metadata"])
+            ld = lambda n: nib.load(os.path.join(anat, f"sub-1_{n}.nii")).get_fdata()
+            np.testing.assert_allclose(ld("desc-calcification_Chimap-neg"), np.where(calc, 3.0, 0.0), atol=1e-6)
+            np.testing.assert_allclose(ld("Chimap-neg")[calc], 3.0, atol=1e-6)     # scored χ- includes it
+            np.testing.assert_allclose(ld("Chimap")[calc], -3.0, atol=1e-6)        # and so does the field's χ
+            np.testing.assert_allclose(ld("desc-formula_R2prime")[calc], chisep.dr_static_dephasing(3.0) * 3.0, rtol=1e-5)
+            meta = json.load(open(written["metadata"]))
+            assert meta["Calcification"]["ChiNegPpm"] == qsm_forward.CALCIFICATION_CHI_PPM == -3.3
+            assert meta["Calcification"]["Signal"]["Voxels"] == int(calc.sum())
+            # the calcification voxels decay by the solid-sphere static-dephasing factor (R2 = 0 there)
+            raw = os.path.join(tmp, "bids", "sub-1", "anat")
+            mag = [nib.load(os.path.join(raw, f"sub-1_echo-{i + 1}_part-mag_MEGRE.nii")).get_fdata()[calc] for i in range(4)]
+            f = [np.abs(meso.static_sphere_factor(t * 1e-3, -3.0, 3.0)) for t in tes]
+            np.testing.assert_allclose(mag[1] / mag[0], f[1] / f[0], rtol=1e-4)
+        # the Ridani presets stay as published; the benchmark presets restore it
+        assert not any(chisep.PRESETS[k].calcification for k in ("ridani-3t-iso", "ridani-3t-aniso", "ridani-7t-aniso"))
+        assert chisep.PRESETS["wm-micro-7t"].calcification and chisep.PRESETS["wm-micro-7t"].chimap_echoes
+        assert qsm_forward.chisep_tissue_params()[16] == qsm_forward.CHISEP_TISSUE_PARAMS[16] == (0.0,) * 6
+        assert qsm_forward.chisep_tissue_params(True)[16][:2] == (0.0, -3.3)
+
+    def test_static_sphere_function(self):
+        x = np.array([0.01, 200.0])
+        f = meso.static_sphere_fs(x)
+        assert f[0].real == pytest.approx(0.4 * x[0] ** 2, rel=1e-3)                      # quadratic onset
+        assert f[1].real == pytest.approx(2 * np.pi / (3 * np.sqrt(3)) * x[1] - 1, rel=2e-3)  # Y&H limit
+        assert meso.static_sphere_fs(-x[1]) == pytest.approx(np.conj(f[1]))
 
     def test_cli_preset(self):
         from unittest.mock import patch

@@ -437,6 +437,17 @@ class MesoscopicSignal:
     def gre(self, TE_s, R2):
         return self.mask, self._eval(TE_s * 1e3, R2, se=False)
 
+    def intra_phase(self, te_ms, R2):
+        """Intra-voxel phase (rad) of the voxel factor at each echo, (n_te,) + grid shape, unwrapped
+        along TE from 0 (the phase beyond the macroscopic field: myelin water, sheath and iron
+        frequency shifts); zero outside the model's voxels."""
+        te_ms = np.atleast_1d(np.asarray(te_ms, float))
+        vals = np.stack([self._eval(t, R2, se=False) for t in te_ms], -1)
+        ph = np.unwrap(np.concatenate([np.zeros(vals.shape[:-1] + (1,)), np.angle(vals)], -1), axis=-1)[..., 1:]
+        out = np.zeros((len(te_ms),) + self.mask.shape)
+        out[:, self.mask] = ph.T
+        return out
+
     def se(self, TE_s, R2):
         return self.mask, np.abs(self._eval(TE_s * 1e3, R2, se=True))
 
@@ -715,6 +726,153 @@ class SphereSignal:
 
     def se(self, TE_s, R2):
         return None
+
+    def intra_phase(self, te_ms, R2=None):
+        """Intra-voxel phase (rad), (n_te,) + grid shape, unwrapped along TE from 0 (complex
+        interpolation: on the LUT's TE grid up to the last echo, see :meth:`SphereLUT.unwrapped_phase`)."""
+        te_ms = np.atleast_1d(np.asarray(te_ms, float))
+        ph = self.lut.unwrapped_phase(self._cp, self._cn, te_ms, self.convention, self.interp, mapping=self.mapping)
+        out = np.zeros((len(te_ms),) + self.mask.shape)
+        out[:, self.mask] = ph.T
+        return out
+
+
+# ----------------------------------------------------------------------------------------
+# calcification: solid diamagnetic spheres, static dephasing
+# ----------------------------------------------------------------------------------------
+# Source susceptibility of the solid mineral relative to water: hydroxyapatite -14.83 ppm against
+# water -9.035 ppm (SI volume susceptibilities; Liu C. et al. JMRI 2015;42:23-41, Table 1, after
+# Hopkins J.A., Wehrli F.W. MRM 1997;37:494-500), so Δχ_s = -5.8 ppm. In the static-dephasing
+# regime the decay beyond t ~ 1/δω_s (0.4 ms at 3 T) depends only on the bulk ζ·Δχ_s, so the
+# value only sets the (sub-millisecond) quadratic onset and ζ.
+CALCIFICATION_CHI_S_PPM = -14.83 - (-9.035)
+
+
+def _sphere_p2_average(a):
+    """∫_0^1 exp(i·a·(3μ² - 1)) dμ (the orientation average of one sphere's dipolar phase a·P2),
+    in closed form with Fresnel integrals; a may be negative (complex conjugate)."""
+    from scipy.special import fresnel
+    a = np.asarray(a, float)
+    aa = np.maximum(np.abs(a), 1e-300)
+    z = np.sqrt(6 * aa / np.pi)
+    S, C = fresnel(z)
+    v = np.exp(-1j * aa) * (C + 1j * S) / z
+    v = np.where(np.abs(a) < 1e-6, 1.0 + 0j, v)
+    return np.where(a < 0, np.conj(v), v)
+
+
+_FS_TABLE = {}
+
+
+def static_sphere_fs(x):
+    """Static-dephasing function of dilute, randomly placed spheres (Yablonskiy & Haacke 1994):
+    S(t) = exp(-ζ·f(x)), x = δω·t, δω = γB0Δχ_s/3 (signed), from the water OUTSIDE the spheres,
+        f(x) = ∫_0^1 ds/s² [1 - <exp(i·x·s·P2(μ))>_μ] = x·∫_0^x da/a² [1 - <exp(i·a·P2)>_μ]
+    (s = (R/r)³). Re f ≈ 0.4·x² for |x| << 1 and (2π/(3√3))·|x| - 1 for |x| >> 1 (R2' =
+    (2π/(9√3))·γB0·ζ|Δχ_s|). The imaginary part (≈ 0.16·x for large |x|) is the frequency shift of
+    the water that is still coherent: the strongly dephased near zones around the spheres are not
+    symmetric between the positive (polar) and negative (equatorial) lobes of the dipole field. It is
+    the same physics the iron-sphere LUTs carry (they average exp(iωt) over the box). Complex,
+    tabulated on first use (|x| <= 2000, linear beyond)."""
+    if "x" not in _FS_TABLE:
+        a = np.concatenate([np.linspace(0, 1, 2001)[:-1], np.geomspace(1, 2000, 40001)])
+        g = np.full(a.shape, 0.4, complex)   # the a -> 0 limit, <P2²>/2
+        g[1:] = (1 - _sphere_p2_average(a[1:])) / a[1:] ** 2
+        F = np.concatenate([[0], np.cumsum(0.5 * (g[1:] + g[:-1]) * np.diff(a))])
+        _FS_TABLE["x"], _FS_TABLE["f"] = a, a * F
+    xs, fs = _FS_TABLE["x"], _FS_TABLE["f"]
+    x = np.asarray(x, float)
+    ax = np.abs(x)
+    slope = (fs[-1] - fs[-2]) / (xs[-1] - xs[-2])
+    v = np.where(ax <= xs[-1], np.interp(ax, xs, fs.real) + 1j * np.interp(ax, xs, fs.imag),
+                 fs[-1] + slope * (ax - xs[-1]))
+    return np.where(x < 0, np.conj(v), v)
+
+
+def static_sphere_factor(te_s, chi_bulk, b0, chi_s=CALCIFICATION_CHI_S_PPM):
+    """Complex GRE factor exp(-ζ·f(δω·TE)) (:func:`static_sphere_fs`) of solid (water-free) spheres
+    of susceptibility ``chi_s`` (ppm, relative to the surrounding water) at volume fraction
+    ζ = chi_bulk/chi_s, static dephasing. The magnitude does not depend on the sign of the source;
+    the phase does (the coherent water's frequency shift). The source's macroscopic field is the
+    dipole field of its bulk χ, which the caller adds. R2' tends to 2πγB0·ζ|Δχ_s|/(9√3) =
+    :func:`qsm_forward.chisep.dr_static_dephasing`·|chi_bulk|. The theory is for dilute spheres
+    (ζ << 1); a dense calcification (ζ ~ 0.5) is an extrapolation."""
+    zeta = np.abs(np.asarray(chi_bulk, float)) / abs(chi_s)
+    dw = GAMMA * 1e3 * b0 * chi_s * 1e-6 / 3.0                # rad/s, signed
+    return np.exp(-zeta * static_sphere_fs(dw * np.asarray(te_s, float)))
+
+
+class CalcificationSignal:
+    """Adds a calcification, modelled as solid diamagnetic spheres in static dephasing
+    (:func:`static_sphere_factor`), to a voxel signal model.
+
+    ``base`` is the signal model of the tissue around it (:class:`MesoscopicSignal`,
+    :class:`SphereSignal`, or None for the caller's own model), built from the TISSUE χ (the
+    calcification's χ- removed). ``chi_calc`` is the calcification's bulk χ- (<= 0, ppm) on the
+    simulation grid. In voxels with calcification the GRE factor is the tissue factor times the
+    spheres' factor (independent sources dephase multiplicatively); outside ``base``'s voxels the
+    tissue factor is the chi-sep mono decay exp(-TE·(R2 + ``r2p_tissue``)), ``r2p_tissue`` the
+    tissue's own R2' (Dr+|χ+| + Dr-|χ- tissue|). It is the same
+    static-dephasing physics as the iron spheres of the LUTs with the sign flipped, without water
+    inside the source (solid mineral): the head model's measured M0 is already low there (the
+    challenge segmented the calcification on M0), so no extra proton-density factor is applied.
+    Static spheres are refocused by a spin echo, so the SE is the base model's (or the caller's).
+    Every other attribute is the base model's."""
+
+    def __init__(self, base, chi_calc, r2p_tissue, b0, chi_s=CALCIFICATION_CHI_S_PPM):
+        self.base = base
+        self.b0, self.chi_s = float(b0), float(chi_s)
+        calc = np.minimum(np.asarray(chi_calc, float), 0.0)
+        self.calc_mask = calc < 0
+        bmask = base.mask if base is not None else np.zeros(calc.shape, bool)
+        self.mask = bmask | self.calc_mask
+        self._in_base = bmask[self.mask]
+        self._calc = calc[self.mask]
+        self._r2p = np.broadcast_to(np.asarray(r2p_tissue, float), calc.shape)[self.mask]
+
+    def __getattr__(self, name):
+        base = self.__dict__.get("base")
+        if base is None:
+            raise AttributeError(name)
+        return getattr(base, name)
+
+    def calc_factor(self, TE_s):
+        return static_sphere_factor(TE_s, self._calc, self.b0, self.chi_s)
+
+    def gre(self, TE_s, R2):
+        r2 = np.broadcast_to(np.asarray(R2, float), self.mask.shape)[self.mask]
+        out = np.exp(-TE_s * (r2 + self._r2p)).astype(np.complex128)
+        if self.base is not None:
+            out[self._in_base] = self.base.gre(TE_s, R2)[1]
+        return self.mask, out * self.calc_factor(TE_s)
+
+    def se(self, TE_s, R2):
+        return self.base.se(TE_s, R2) if self.base is not None else None
+
+    def intra_phase(self, te_ms, R2):
+        """Intra-voxel phase (rad), (n_te,) + grid shape: the base model's plus the calcification
+        spheres' coherent-water frequency shift (unwrapped along TE)."""
+        te_ms = np.atleast_1d(np.asarray(te_ms, float))
+        out = (self.base.intra_phase(te_ms, R2) if self.base is not None
+               else np.zeros((len(te_ms),) + self.mask.shape))
+        cf = np.stack([self.calc_factor(t * 1e-3) for t in te_ms], -1)
+        ph = np.unwrap(np.concatenate([np.zeros(cf.shape[:-1] + (1,)), np.angle(cf)], -1), axis=-1)[..., 1:]
+        add = np.zeros_like(out)
+        add[:, self.mask] = ph.T
+        return out + add
+
+    def report(self, seg):
+        """For the sidecar: where the calcification is and what it does."""
+        lab = np.rint(np.asarray(seg)).astype(int)[self.mask][~(self._calc == 0)]
+        te = np.array([2.7e-3, 10e-3, 30e-3])
+        return {"Model": "solid diamagnetic spheres, static dephasing (Yablonskiy & Haacke 1994), no water "
+                         "inside; GRE factor exp(-ζ f(δω TE)), ζ = |χ_calc|/|Δχ_s|, complex f (coherent-water "
+                         "frequency shift); refocused by the spin echo; M0 from the head model (already low)",
+                "ChiSourcePpm": self.chi_s, "Voxels": int(self.calc_mask.sum()),
+                "VoxelsByLabel": {str(k): int(np.sum(lab == k)) for k in np.unique(lab)},
+                "BulkChiNegMinPpm": float(self._calc.min()) if self._calc.size else 0.0,
+                "BulkChiNegSumPpmVoxels": float(self._calc.sum()),
+                "R2primeLimitPerPpm": float(2 * np.pi * GAMMA * 1e3 * self.b0 * 1e-6 / (9 * np.sqrt(3)))}
 
 
 # ----------------------------------------------------------------------------------------

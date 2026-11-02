@@ -72,7 +72,25 @@ Signal models (``signal_model``):
   Both need ``relaxation="linear"``: its ``dr`` is the nominal relaxivity recorded in the
   sidecar, used outside the brain labels and for the ``*_desc-formula_R2prime`` reference; the
   signal itself takes no relaxivity.
+  Per-echo χ (``chimap_echoes``, "mesoscopic" and "spheres"): ``*_Chimap-echoes.nii`` =
+  χ_GT + [STAR(echo i) - STAR_ref(echo i)] as above, the intra-voxel phase being the signal model's
+  own (for "mesoscopic": the phase of the voxel factor beyond the macroscopic field, unwrapped along
+  TE: myelin-water, sheath and iron frequency shifts). The mono-exponential models have a phase
+  linear in TE, so their χ(TE) is χ repeated (the same definition gives exactly 0 extra) and nothing
+  is written; consumers fall back to ``*_Chimap``.
 New signal models plug in through :data:`SIGNAL_MODELS` and :func:`_signal_kwargs`.
+
+Calcification (``calcification``; on for meso-3t and wm-micro-7t, off for the Ridani presets, which
+stay as published): the challenge head's calcification (label 16) is restored as a purely diamagnetic
+source, χ- = -3.3 ppm, χ+ = 0 (Marques et al. 2021, Table 1; Ridani's table has 0, see
+:data:`qsm_forward.qsm_forward.CALCIFICATION_CHI_PPM`). It is in ``*_Chimap-neg`` (scored),
+``*_Chimap`` and so in the field, and alone in ``*_desc-calcification_Chimap-neg``. Its signal, in
+every signal model, is that of solid diamagnetic spheres in static dephasing
+(:class:`qsm_forward.mesoscopic.CalcificationSignal`): no water inside (the mineral), the same physics
+as the LUTs' iron spheres with the sign flipped, multiplied onto the tissue's own factor in the voxel
+(the tissue model gets the voxel's χ- without the calcification), refocused by the spin echo. Its
+R2' thus emerges from the simulated signal (long-TE limit 2πγB0/(9√3) = 323.5 Hz/ppm at 3 T, which
+the formula R2' uses for the calcification's share).
 
 The shipped R2' (``r2prime_source``):
   formula  the R2' the generator imposes (the relaxation formula above, or the hollow-cylinder
@@ -109,8 +127,8 @@ import numpy as np
 
 from . import degrade, mesoscopic
 from .qsm_forward import (
-    DR_KERNEL, ReconParams, TissueParams, generate_bids, generate_dr_maps_ridani,
-    generate_r2prime, generate_theta_from_v1, resize,
+    CALCIFICATION_CHI_PPM, CALCIFICATION_LABEL, DR_KERNEL, ReconParams, TissueParams, chisep_tissue_params,
+    generate_bids, generate_dr_maps_ridani, generate_r2prime, generate_theta_from_v1, resize,
 )
 
 SIGNAL_MODELS = ("mono", "hollow-cylinder", "mesoscopic", "spheres")
@@ -161,7 +179,8 @@ class ChisepConfig:
     meso_table: str = "diffusion"  # "mesoscopic": "diffusion" | "static" LUT
     meso_lut: Optional[str] = None   # "mesoscopic"/"spheres": LUT path (default: mesoscopic.lut_path)
     sphere_convention: str = "decompose"  # "spheres": "decompose" | "lorentz"
-    chimap_echoes: bool = False    # "spheres": write the per-echo χ(TE) (needs QSM.rs's STAR)
+    chimap_echoes: bool = False    # "mesoscopic"/"spheres": write the per-echo χ(TE) (needs QSM.rs's STAR)
+    calcification: bool = False    # restore the challenge head's calcification as a χ- source (see below)
     sphere_source_range: str = "in-range"  # "spheres": "in-range" | "highchi" (mesoscopic.SourceMapping)
     sphere_chi_s_max: Optional[float] = None  # "in-range": χ_s cap, ppm (None: source-phase limit at max TE)
     sphere_zeta_total_max: float = mesoscopic.ZETA_TOTAL_MAX  # "in-range": cap on ζ+ + ζ-
@@ -203,8 +222,9 @@ class ChisepConfig:
                              "nominal relaxivity outside the brain labels and of the formula R2')")
         if self.signal_model == "spheres" and self.b0 != 3.0:
             raise ValueError("signal_model='spheres' is tabulated at 3 T only")
-        if self.chimap_echoes and self.signal_model != "spheres":
-            raise ValueError("chimap_echoes is defined for signal_model='spheres'")
+        if self.chimap_echoes and self.signal_model not in ("mesoscopic", "spheres"):
+            raise ValueError("chimap_echoes is defined for signal_model='mesoscopic' or 'spheres' (the other "
+                             "models have a linear phase, so their χ(TE) is χ repeated)")
         bad = [lv for lv in self.degrade_levels if lv not in degrade.LEVELS]
         if bad:
             raise ValueError(f"degrade_levels must be among {degrade.LEVELS}, got {bad}")
@@ -250,11 +270,11 @@ PRESETS = {
                               description="3 T co-located linear R2' (Dr = 141.7) with R2* = 274·(|χ+| + |χ-|)"),
     # Mesoscopic myelin + iron (diffusion Monte Carlo LUT), Chen-like 3 T protocol.
     "meso-3t": ChisepConfig(signal_model="mesoscopic", meso_table="diffusion", dr=dr_toolbox(3.0),
-                            **_CHEN_3T, **_MESO,
+                            calcification=True, chimap_echoes=True, **_CHEN_3T, **_MESO,
                             description="3 T mesoscopic sub-voxel sources (hollow-cylinder myelin, iron spheres; diffusion)"),
     # 7 T, 8 echoes 3-45 ms, white matter from mesoscopic hollow cylinders (not a closed form).
     "wm-micro-7t": ChisepConfig(signal_model="mesoscopic", meso_table="diffusion", dr=dr_toolbox(7.0),
-                                b0=7.0, tes_ms=(3, 9, 15, 21, 27, 33, 39, 45), **_MESO,
+                                calcification=True, chimap_echoes=True, b0=7.0, tes_ms=(3, 9, 15, 21, 27, 33, 39, 45), **_MESO,
                                 description="7 T mesoscopic white-matter microstructure (hollow cylinders; diffusion)"),
     # Water-containing spheres after Chen et al. 2021, per-echo χ(TE); one per intra-source convention.
     # Source χ_s inside the authors' simulated range (<= the source-phase limit, 0.127 ppm), the bulk
@@ -331,14 +351,49 @@ def build_chisep_maps(data_dir: str, config: ChisepConfig, b0_dir=(0.0, 0.0, 1.0
         # squared components, so no vector-component negation is needed.
         v1_kw["v1"] = np.flip(nib.load(v1_path).get_fdata().astype(np.float32), axis=0).copy()
     tp = TissueParams(root_dir=data_dir, chisep_anisotropy=config.anisotropic,
-                      chisep_apply_brain_mask=False, **v1_kw)
+                      chisep_apply_brain_mask=False,
+                      chisep_tissue_params=chisep_tissue_params(config.calcification), **v1_kw)
     chi_pos = tp.chi_pos.get_fdata().astype(np.float32)
     chi_neg = tp.chi_neg.get_fdata().astype(np.float32)
     seg = tp.seg.get_fdata()
     theta = generate_theta_from_v1(tp.v1.get_fdata(), np.asarray(b0_dir)) if tp.v1 is not None else None
     dr_pos, dr_neg = relaxivity_maps(seg, theta, config)
+    extra = {}
+    if config.calcification:
+        # the calcification's own χ-: everything diamagnetic inside the label-16 voxels (the tissue
+        # probability tails there are a few ppb against -2 to -3.3 ppm)
+        extra["chi_calc"] = np.where(np.rint(seg) == CALCIFICATION_LABEL, chi_neg, 0.0).astype(np.float32)
+        extra["dr_neg_tissue"] = dr_neg
+        dr_neg = calcification_relaxivity(dr_neg, chi_neg, extra["chi_calc"], config.b0)
     r2prime = generate_r2prime(chi_pos, chi_neg, dr=dr_pos, dr_neg=dr_neg)
-    return ChisepMaps(tp, chi_pos, chi_neg, theta, dr_pos, dr_neg, r2prime)
+    return ChisepMaps(tp, chi_pos, chi_neg, theta, dr_pos, dr_neg, r2prime, extra)
+
+
+# Smallest calcification χ- (ppm, magnitude) a simulation-grid voxel must hold to be modelled as
+# calcification (the downsampling's interpolation tails below it carry 0.05 % of the source).
+CALC_MIN_PPM = 1e-3
+
+
+def calcification_component(maps: "ChisepMaps"):
+    """The calcification's χ- on the native grid: ``maps.extra["chi_calc"]`` (set by
+    :func:`build_chisep_maps`), else everything diamagnetic in the label-16 voxels."""
+    if "chi_calc" in maps.extra:
+        return maps.extra["chi_calc"]
+    seg = np.rint(maps.tissue.seg.get_fdata())
+    return np.where(seg == CALCIFICATION_LABEL, np.minimum(maps.chi_neg, 0.0), 0.0).astype(np.float32)
+
+
+def calcification_relaxivity(dr_neg, chi_neg, chi_calc, b0):
+    """Dr- (Hz/ppm) with the calcification's share relaxing at the static-dephasing relaxivity of
+    spheres, :func:`dr_static_dephasing` (the long-TE limit of its signal model): in each voxel the
+    χ--weighted mean of the tissue's Dr- and that. Only the formula R2' (``*_desc-formula_R2prime``)
+    and the mono decay read it; the calcification's signal itself comes from
+    :class:`qsm_forward.mesoscopic.CalcificationSignal`."""
+    cn, cc = np.abs(np.asarray(chi_neg, float)), np.abs(np.asarray(chi_calc, float))
+    dr = np.broadcast_to(np.asarray(dr_neg, float), cn.shape)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(cc > 0, (dr * np.maximum(cn - cc, 0) + dr_static_dephasing(b0) * cc) / np.maximum(cn, 1e-30), dr)
+    return out.astype(np.float32)
 
 
 def _downsample_theta(theta, ds):
@@ -357,11 +412,10 @@ def _downsample_theta(theta, ds):
 def _signal_kwargs(config: ChisepConfig, factor=None) -> dict:
     """generate_bids keyword arguments that select ``config.signal_model``. ``factor`` is the
     per-voxel model of the LUT-driven signal models (:func:`signal_factor`)."""
+    kw = dict(signal_factor=factor) if factor is not None else {}
     if config.signal_model == "hollow-cylinder":
-        return dict(chisep_multicompartment=True, chisep_hc_b0=config.hc_b0)
-    if config.signal_model in ("mesoscopic", "spheres"):
-        return dict(signal_factor=factor)
-    return {}
+        kw.update(chisep_multicompartment=True, chisep_hc_b0=config.hc_b0)
+    return kw
 
 
 def load_lut(config: ChisepConfig):
@@ -450,14 +504,33 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         return resize(nii, voxel, interp).get_fdata().astype(np.float32)
 
     chi_pos = ds(maps.chi_pos)
-    chi_neg = ds(maps.chi_neg)
+    if config.calcification:
+        # the tissue's and the calcification's χ- are resampled separately (the resampling is not
+        # linear: it removes Gibbs ringing) and χ- is their sum, so tissue + calcification = χ- exactly
+        calc_native = calcification_component(maps)
+        chi_neg_tissue = ds(maps.chi_neg - calc_native)
+        chi_calc = ds(calc_native)
+        # interpolation spreads ppb-level tails over the grid: below CALC_MIN_PPM they count as tissue
+        keep = chi_calc < -CALC_MIN_PPM
+        chi_neg_tissue = np.where(keep, chi_neg_tissue, chi_neg_tissue + chi_calc).astype(np.float32)
+        chi_calc = np.where(keep, chi_calc, 0.0).astype(np.float32)
+        chi_neg = (chi_neg_tissue + chi_calc).astype(np.float32)
+    else:
+        chi_neg = ds(maps.chi_neg)
+        chi_calc = np.zeros_like(chi_neg)
+        chi_neg_tissue = chi_neg
     chi_total = chi_pos + chi_neg
     if config.relaxation == "linear":
         # a constant map: build it on the simulation grid rather than interpolate it there
         dr_pos = dr_neg = np.full(chi_pos.shape, config.dr, np.float32)
     else:
         dr_pos = ds(maps.dr_pos)
-        dr_neg = ds(maps.dr_neg)
+        dr_neg = ds(maps.dr_neg)   # (calcification share already folded in on the native grid)
+    dr_neg_tissue = ds(maps.extra["dr_neg_tissue"]) if "dr_neg_tissue" in maps.extra and config.relaxation != "linear" else dr_neg
+    # the tissue's own reversible rate, for calcification voxels outside a LUT model's voxels
+    r2p_tissue = (dr_pos * np.abs(chi_pos) + dr_neg_tissue * np.abs(chi_neg_tissue)).astype(np.float32)
+    if config.calcification and config.relaxation == "linear":
+        dr_neg = calcification_relaxivity(dr_neg, chi_neg, chi_calc, config.b0)
     theta = None
     if maps.theta is not None:
         theta = maps.theta.astype(np.float32) if native else _downsample_theta(maps.theta, ds)
@@ -468,14 +541,17 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
     lut = load_lut(config)
     factor = None
     chi_neg_app = None
+    seg_sim = ds(tp.seg.get_fdata(), "nearest") if (lut is not None or config.calcification) else None
     if lut is not None:
-        seg_sim = ds(tp.seg.get_fdata(), "nearest")
         theta_fibre = fibre_theta(theta, seg_sim)
         if config.signal_model == "mesoscopic":
-            # the field follows the voxel-mean sheath tensor: apparent χ- in white matter
-            chi_neg_app = mesoscopic.chi_neg_apparent(chi_neg, np.deg2rad(theta_fibre)).astype(np.float32)
+            # the field follows the voxel-mean sheath tensor: apparent χ- in white matter (the
+            # calcification is isotropic)
+            chi_neg_app = (mesoscopic.chi_neg_apparent(chi_neg_tissue, np.deg2rad(theta_fibre)) + chi_calc).astype(np.float32)
             chi_total = chi_pos + chi_neg_app
-        factor = signal_factor(config, lut, chi_pos, chi_neg, theta_fibre, seg_sim)
+        factor = signal_factor(config, lut, chi_pos, chi_neg_tissue, theta_fibre, seg_sim)
+    if config.calcification:
+        factor = mesoscopic.CalcificationSignal(factor, chi_calc, r2p_tissue, config.b0)
 
     with tempfile.TemporaryDirectory() as tmpd:
         def w(name, arr):
@@ -540,6 +616,7 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
         return p
 
     meta = phantom_metadata(config, maps)
+    base = factor.base if isinstance(factor, mesoscopic.CalcificationSignal) else factor
     if config.signal_model == "mesoscopic":
         written["chi_neg_apparent"] = save_like_ref("desc-apparent_Chimap-neg", np.abs(chi_neg_app))
         meta["SignalModel"] = {
@@ -550,8 +627,8 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
                       "desc-apparent: voxel-mean sheath tensor projected on B0 (drives the field)",
             "Chimap": "χ+ + apparent χ-: the total the simulated field is computed from",
         }
-        floor = np.zeros(factor.mask.shape, np.uint8)
-        floor[factor.mask] = factor.floored
+        floor = np.zeros(base.mask.shape, np.uint8)
+        floor[base.mask] = base.floored
         out = os.path.join(anat, f"{stem}_desc-r2floor_mask.nii")
         nib.save(nib.Nifti1Image(floor, ref_nii.affine, ref_nii.header), out)
         written["r2floor_mask"] = out
@@ -560,19 +637,28 @@ def generate_chisep_bids(data_dir: str, bids_dir: str, config: ChisepConfig, map
                                "LUT": os.path.basename(lut.path),
                                "WrapLimitPpm": float(mesoscopic.wrap_limit_ppm(max(config.tes_ms), config.b0)),
                                "Sources": factor.source_report(max(config.tes_ms))}
-        flag = np.zeros(factor.mask.shape, np.uint8)
-        flag[factor.mask] = factor.source_flag
+        flag = np.zeros(base.mask.shape, np.uint8)
+        flag[base.mask] = base.source_flag
         out = os.path.join(anat, f"{stem}_desc-sourcerange_mask.nii")
         nib.save(nib.Nifti1Image(flag, ref_nii.affine, ref_nii.header), out)
         written["sourcerange_mask"] = out
-        if config.chimap_echoes:
-            written["chimap_echoes"] = write_chimap_echoes(anat, stem, config, factor)
-            meta["SignalModel"]["ChimapEchoes"] = (
-                "χ_GT + [STAR(echo i) - STAR_ref(echo i)]: per-echo STAR-QSM (QSM.rs, exact port of "
-                "STI Suite 3.0 QSM_star) of the noiseless local phase, Laplacian-unwrapped (STI "
-                "MRPhaseUnwrap settings), mask mean removed; STAR_ref = the same processing of a "
-                "perfectly linear phase (ground-truth local field × TE), so STAR's own echo "
-                "dependence cancels and only the tissue's remains")
+    if config.calcification:
+        written["chi_calc"] = save_like_ref("desc-calcification_Chimap-neg", np.abs(chi_calc))
+        meta["Calcification"] = {
+            "ChiNegPpm": CALCIFICATION_CHI_PPM, "ChiPosPpm": 0.0, "Label": CALCIFICATION_LABEL,
+            "Source": "QSM Challenge 2.0 head, Marques et al. 2021 (doi:10.1002/mrm.28716) Table 1, Model 1 "
+                      "'Calcification' -3.300 ppm; a deviation from Ridani et al.'s table (chipos = chineg = 0)",
+            "Map": "desc-calcification_Chimap-neg: |χ-| of the calcification on the output grid (part of Chimap-neg)",
+            "Signal": factor.report(seg_sim)}
+    if config.chimap_echoes:
+        written["chimap_echoes"] = write_chimap_echoes(anat, stem, config, factor)
+        meta.setdefault("SignalModel", {})["ChimapEchoes"] = (
+            "χ_GT + [STAR(echo i) - STAR_ref(echo i)]: per-echo STAR-QSM (QSM.rs, exact port of "
+            "STI Suite 3.0 QSM_star) of the noiseless local phase (macroscopic local field × TE plus the "
+            "signal model's intra-voxel phase), Laplacian-unwrapped (STI MRPhaseUnwrap settings), mask "
+            "mean removed; STAR_ref = the same processing of a perfectly linear phase (ground-truth "
+            "local field × TE; STAR reads only the phase, so it shares the magnitude), so STAR's own "
+            "echo dependence cancels and only the tissue's remains")
     out = os.path.join(anat, f"{stem}_chisep.json")
     with open(out, "w") as f:
         json.dump(meta, f, indent=2)
@@ -627,8 +713,15 @@ def write_subvoxel_field(bids_dir, config: ChisepConfig, subject="1", factor=Non
         if os.path.exists(os.path.join(anat, f"{stem}_fibreangle.nii")):
             theta = load("fibreangle")
             theta[theta == 0] = np.nan   # written as 0 where there is no fibre direction
-        factor = signal_factor(config, load_lut(config), load("Chimap-pos"), -np.abs(load("Chimap-neg")),
-                               fibre_theta(theta, seg), seg)
+        chi_pos, chi_neg = load("Chimap-pos"), -np.abs(load("Chimap-neg"))
+        calc_path = os.path.join(anat, f"{stem}_desc-calcification_Chimap-neg.nii")
+        chi_calc = -np.abs(load("desc-calcification_Chimap-neg")) if os.path.exists(calc_path) else None
+        if chi_calc is not None:
+            chi_neg = chi_neg - chi_calc
+        factor = signal_factor(config, load_lut(config), chi_pos, chi_neg, fibre_theta(theta, seg), seg)
+        if chi_calc is not None:
+            factor = mesoscopic.CalcificationSignal(factor, chi_calc, config.dr * (np.abs(chi_pos) + np.abs(chi_neg)),
+                                                    config.b0)
     ref_nii = nib.load(ref)
     out = os.path.join(anat, f"{stem}_desc-subvoxel_fieldmap.nii")
     tes = np.asarray(config.tes_ms, float) * 1e-3
@@ -637,9 +730,10 @@ def write_subvoxel_field(bids_dir, config: ChisepConfig, subject="1", factor=Non
 
 
 def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, unwrap="laplacian"):
-    """Write ``*_Chimap-echoes.nii`` (4D, ppm) for a ``spheres`` phantom from the written ground
-    truth (``*_Chimap``, ``*_fieldmap-local``, ``*_mask``) and the per-voxel intra-voxel phase
-    (:func:`qsm_forward.mesoscopic.star_chimap_echoes`). ``tools`` defaults to
+    """Write ``*_Chimap-echoes.nii`` (4D, ppm) for a LUT-driven phantom (``mesoscopic`` or ``spheres``)
+    from the written ground truth (``*_Chimap``, ``*_fieldmap-local``, ``*_mask``, ``*_R2map``) and the
+    signal model's per-voxel intra-voxel phase at each echo (``factor.intra_phase``), through
+    :func:`qsm_forward.mesoscopic.star_chimap_echoes`. ``tools`` defaults to
     :class:`qsm_forward.mesoscopic.QsmrsTools`."""
     tools = tools or mesoscopic.QsmrsTools()
     load = lambda name: nib.load(os.path.join(anat, f"{stem}_{name}.nii"))
@@ -649,11 +743,10 @@ def write_chimap_echoes(anat, stem, config: ChisepConfig, factor, tools=None, un
     mask = load("mask").get_fdata() > 0.5
     if local.shape != factor.mask.shape:
         raise ValueError("chimap_echoes needs the signal simulated on the output grid")
+    r2_path = os.path.join(anat, f"{stem}_R2map.nii")
+    R2 = load("R2map").get_fdata() if os.path.exists(r2_path) else np.zeros(local.shape)
     tes = np.asarray(config.tes_ms, float)
-    intra = np.zeros((len(tes),) + local.shape)
-    ph = factor.lut.unwrapped_phase(factor._cp, factor._cn, tes, factor.convention, factor.interp,
-                                    mapping=factor.mapping)
-    intra[:, factor.mask] = ph.T
+    intra = factor.intra_phase(tes, R2)
     phases = mesoscopic.echo_local_phases(local, tes, config.b0, intra)
     ref_phases = mesoscopic.echo_local_phases(local, tes, config.b0)
     voxel = np.asarray(ref.header.get_zooms()[:3], float)
