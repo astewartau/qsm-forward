@@ -62,6 +62,23 @@ Streak labels (:func:`cone_restricted_error`)
   The reconstruction error restricted to a narrow band around the magic-angle cone in k-space:
   with the exact truth of a phantom, this is the exact streaking label.
 
+Brain labels (:func:`seg_from_freesurfer`)
+  Maps a SynthSeg/FreeSurfer segmentation to the 2019 head phantom's label scheme (what QSM-CI's
+  region metrics read), with overrides for nuclei aseg lacks (red nucleus, dentate, substantia
+  nigra). With labels, R1 is set per tissue from literature T1 at 3 T (:data:`T1_3T_BY_LABEL`).
+
+Simulating without the inverse crime (:func:`upsample_phantom`, :func:`simulate_acquisition`)
+  The phantom is put on a finer grid (smooth class boundaries, spline χ; sources inserted after),
+  the signal simulated there and reduced to the acquisition matrix by k-space cropping, and the
+  reference maps written as partial-volume averages over each acquisition voxel. Noise is complex
+  Gaussian with an absolute σ in the source magnitude's units (:func:`add_bids_noise`), so it can
+  be calibrated to the source data. :func:`dipole_field` is a single-precision forward model with
+  a modest pad, so a 0.67 mm head fits in a few GB.
+
+  The χ source matters: a single-orientation reconstruction carries its inversion's cone
+  suppression into the truth (reconstructions of the phantom are then suppressed twice). A
+  multi-orientation COSMOS map has no single-orientation cone deficit and is preferred.
+
 Simulation (:func:`simulate`)
   Saves the phantom in the qsm-forward layout (``chimodel/``, ``maps/``, ``masks/``), runs
   :func:`qsm_forward.generate_bids` with the true total field (``*_fieldmap.nii``), true local field

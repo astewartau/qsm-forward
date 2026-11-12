@@ -284,6 +284,10 @@ ground-truth maps always describe the same grid.
 phantom with an exact truth, so each subject and scanner gives a new anatomy, and inserts strong
 sources with known position, size and strength. The module docstring describes each step.
 
+- **Choice of χ source**: a single-orientation reconstruction carries its inversion's cone
+  suppression into the truth, and reconstructions of the phantom are then suppressed twice. A
+  multi-orientation COSMOS map has no single-orientation cone deficit and is the preferred source
+  where one exists; any well-regularised single-orientation map works, with that caveat.
 - **χ truth**: the in vivo map inside the brain, cleaned by `clean_chi`: outliers at the mask rim
   (and isolated ones inside) replaced, the rim that V-SHARP eroded filled with mirrored texture,
   streak power on the magic cone clamped to the off-cone level, and the white-noise floor removed
@@ -302,6 +306,26 @@ sources with known position, size and strength. The module docstring describes e
   seg label 16, which QSM-CI's calcification metrics read.
 - **Streak labels**: `cone_restricted_error(recon, truth, mask, voxel_size, B0_dir)` is the
   reconstruction error restricted to the magic-angle cone in k-space.
+- **Brain labels**: pass `seg=` to `build_invivo_phantom` with labels in the 2019 head phantom's
+  scheme (1 caudate, 2 globus pallidus, 3 putamen, 4 red nucleus, 5 dentate, 6 substantia nigra,
+  7 thalamus, 8 white matter, 9 grey matter, 10 CSF), which is what QSM-CI's region metrics read and
+  what `insert_sources` uses to place lesions in white matter or deep grey matter.
+  `seg_from_freesurfer(aseg, overrides)` maps a SynthSeg/FreeSurfer segmentation (e.g.
+  `qsmxt segment magnitude.nii.gz -o aseg.nii.gz`) to that scheme; the red nucleus, dentate and
+  substantia nigra are not in aseg and come from `overrides` (another atlas). Labels set R1 per
+  tissue from literature T1 values at 3 T (`T1_3T_BY_LABEL`).
+- **No inverse crime**: `upsample_phantom(phantom, 1.5)` puts the phantom on a finer grid (smooth
+  class boundaries, spline χ); insert sources after it so their edges have fine partial volume.
+  `simulate_acquisition(phantom, bids_dir, TEs, B0, TR, flip_angle, voxel_size, noise_sigma=...)`
+  then simulates the signal there and reduces it to the acquisition matrix by k-space cropping, as
+  `ReconGrid` does, and writes reference maps (χ, mask, total/shimmed/local field) as partial-volume
+  averages over each acquisition voxel. It uses a single-precision dipole field (`dipole_field`)
+  and a subsampled shim fit, so a 0.67 mm head (about 35 M voxels) simulates in about 1.5 min and
+  3 GB, where `generate_bids` pads to 8x the volume in double precision.
+- **Noise**: `noise_sigma` (or `add_bids_noise` afterwards) is complex Gaussian noise in the
+  signal's own units. M0 is in the units of the source magnitude, so a σ measured on the source
+  data applies directly; measure it inside the brain, since coil-combined data often has a
+  suppressed background.
 - **Simulation**: `simulate(phantom, recon_params, bids_dir)` calls `generate_bids` with the true
   total field (`*_fieldmap.nii`), true local field (`*_fieldmap-local.nii`) and shimmed total field
   saved, and writes the source labels (`*_desc-sources_dseg.nii`) and the source table
@@ -321,8 +345,20 @@ ph.save("phantom")
 phantoms.simulate(ph, ReconParams(TEs=np.array(TEs), B0=3, peak_snr=100, random_seed=1), "bids")
 ```
 
-[`examples/invivo_phantoms.py`](qsm_forward/examples/invivo_phantoms.py) does the same from the
-command line for a QSM-CI harmonization acquisition.
+Simulating on a finer grid than the truth, with labels and a measured noise level:
+
+```python
+aseg = nib.load("aseg.nii.gz").get_fdata()        # qsmxt segment on the first-echo magnitude
+seg = phantoms.seg_from_freesurfer(aseg)
+ph = phantoms.build_invivo_phantom(cosmos, mag, TEs, (1, 1, 1), brain, seg=seg, TR=0.044, flip_angle=20)
+fine = phantoms.upsample_phantom(ph, 1.5)          # 0.667 mm
+fine = phantoms.insert_sources(fine, "streak-heavy", seed=1)
+phantoms.simulate_acquisition(fine, "bids", TEs, B0=3, TR=0.044, flip_angle=20,
+                              voxel_size=(1, 1, 1), noise_sigma=7.0, seed=1)
+```
+
+[`examples/invivo_phantoms.py`](qsm_forward/examples/invivo_phantoms.py) does both from the command
+line for a QSM-CI harmonization acquisition (`--seg`, `--upsample`, `--noise-sigma`).
 
 ## Example simulating chi-separation (paramagnetic/diamagnetic) sources
 
