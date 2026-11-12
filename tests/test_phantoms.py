@@ -195,3 +195,14 @@ def test_save_load_simulate_roundtrip(tmp_path, built):
     assert np.allclose(chi, ph.chi[:, :, n:], atol=1e-4)
     meta = json.load(open(os.path.join(out["derivatives"], "sub-1_phantom.json")))
     assert meta["sources"][0]["kind"] == "calcification"
+
+
+def test_cut_faces_are_extended():
+    chi, mag, brain, support, *_ = _synthetic_head()
+    cut = (slice(None), slice(None), slice(0, SHAPE[2] - 3))  # the FOV cuts off the top of the head
+    ph = phantoms.build_invivo_phantom(chi[cut], mag[cut], TES, VOX, brain[cut], chi_support=support[cut],
+                                       neck_mm=6.0, cut_extend_mm=6.0)
+    assert ph.meta["extended_faces"] == {"2-": 4, "2+": 4}
+    assert ph.chi.shape[2] == SHAPE[2] - 3 + 8
+    assert ph.fov[2] == [4, SHAPE[2] - 3 + 4]
+    assert not ph.mask[:, :, -4:].any()

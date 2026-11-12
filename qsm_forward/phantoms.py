@@ -46,8 +46,9 @@ In vivo-derived phantom (:func:`build_invivo_phantom`)
   The field of view of in vivo data usually cuts through the head inferiorly. The FFT forward
   model pads the volume with its corner value (air), which would put an air interface across the
   bottom slice. ``neck_mm`` extends the phantom inferiorly by replicating its bottom slice (brain
-  replaced by soft tissue); :func:`simulate` simulates on the extended grid and crops every output
-  back to the source field of view.
+  replaced by soft tissue), and ``cut_extend_mm`` does the same for any other face the head
+  crosses; :func:`simulate` simulates on the extended grid and crops every output back to the
+  source field of view.
 
 Strong sources and pathology (:func:`insert_sources`)
   :class:`SourceSpec` describes a kind of source with ranges for count, size and strength and a
@@ -658,7 +659,7 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
                          flip_angle: float = 15.0, B0_dir=(0.0, 0.0, 1.0),
                          seg: Optional[np.ndarray] = None, R2star: Optional[np.ndarray] = None,
                          clean: Optional[dict] = None, head: Optional[dict] = None,
-                         neck_mm: float = 40.0, name: Optional[str] = None,
+                         neck_mm: float = 40.0, cut_extend_mm: float = 20.0, name: Optional[str] = None,
                          source: Optional[dict] = None) -> Phantom:
     """Build a phantom whose χ truth inside the brain is a cleaned in vivo χ map.
 
@@ -694,6 +695,9 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     neck_mm : float
         Inferior extension (mm) so the FFT forward model does not see an air interface where the
         field of view cuts through the head. 0 disables it.
+    cut_extend_mm : float
+        The same for any other face of the field of view that the head crosses (more than 0.5 %
+        of the face is not air), e.g. the vertex or the nose; 0 disables it.
     name, source : optional
         Recorded in the phantom's metadata.
     """
@@ -759,11 +763,23 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     arrays = dict(chi=chi_full, M0=M0, R1=R1, R2star=r2.astype(np.float32), mask=target, seg=seg_full,
                   filled=target & ~support)
     n_ext = int(round(neck_mm / vox[ax_inf])) if neck_mm and neck_mm > 0 else 0
-    if n_ext:
-        arrays, affine, fov = _extend_inferior(arrays, affine, ax_inf, inf_at_zero, n_ext, fov)
+    extended = {}
+    for ax in range(3):
+        for at_zero in (True, False):
+            if ax == ax_inf and at_zero == inf_at_zero:
+                n = n_ext
+            else:
+                # any other face the head crosses (top of the head, nose, a narrow in-plane FOV)
+                face = arrays["seg"].take(0 if at_zero else -1, axis=ax)
+                cut = float(np.mean(face != LABEL_AIR)) > 0.005
+                n = int(round(cut_extend_mm / vox[ax])) if cut and cut_extend_mm > 0 else 0
+            if n:
+                arrays, affine, fov = _extend_face(arrays, affine, ax, at_zero, n, fov)
+                extended[f"{ax}{'-' if at_zero else '+'}"] = n
 
     meta = {"name": name, "kind": "invivo", "source": source or {}, "clean": clean_info,
             "neck_mm": float(neck_mm), "neck_slices": n_ext, "inferior_axis": ax_inf,
+            "extended_faces": extended, "cut_extend_mm": float(cut_extend_mm),
             "TEs_source": [float(t) for t in TEs], "TR_source": float(TR), "flip_angle_source": float(flip_angle),
             "B0_dir_source": [float(b) for b in B0_dir],
             "class_volumes_ml": {LABEL_NAMES[l]: float((arrays["seg"] == l).sum() * np.prod(vox) / 1000.0)
@@ -773,8 +789,8 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     return Phantom(voxel_size=vox, affine=affine, fov=fov, meta=meta, **arrays)
 
 
-def _extend_inferior(arrays, affine, ax, at_zero, n, fov):
-    """Replicate the inferior slice ``n`` times; brain there becomes soft tissue."""
+def _extend_face(arrays, affine, ax, at_zero, n, fov):
+    """Replicate the edge slice of one face ``n`` times; brain there becomes soft tissue."""
     pad = [(0, 0)] * 3
     pad[ax] = (n, 0) if at_zero else (0, n)
     out = {}
