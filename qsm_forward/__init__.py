@@ -39,3 +39,4 @@ __all__ = [
 ]
 
 from . import chisep  # noqa: E402  (named chi-separation phantoms; imports the names above)
+from . import phantoms  # noqa: E402  (in vivo-derived head phantoms, strong sources and pathology)
