@@ -272,7 +272,7 @@ def spgr_factor(R1, TR, flip_angle_deg):
 def head_model(magnitude_e1: np.ndarray, brain_mask: np.ndarray, voxel_size,
                t_head: float = 0.10, t_dark: float = 0.35, t_air: float = 0.06,
                closing_mm: float = 4.0, air_opening_mm: float = 2.5, min_air_ml: float = 0.3, bias_sigma_mm: float = 15.0,
-               axial_axis: int = 2) -> np.ndarray:
+               axial_axis: int = 2, bone_max_mm: Optional[float] = 15.0) -> np.ndarray:
     """Label the head from the first-echo magnitude: brain (the given mask), soft tissue, bone,
     air cavities inside the head, and air outside it.
 
@@ -283,7 +283,10 @@ def head_model(magnitude_e1: np.ndarray, brain_mask: np.ndarray, voxel_size,
         bone or air, the rest soft tissue (scalp, muscle, CSF outside the brain mask, fat);
       - dark voxels at the level of the air outside the head (raw magnitude < ``t_air``) that survive
         an ``air_opening_mm`` opening (bulky, unlike the skull shell), in components of at least
-        ``min_air_ml``, are air cavities; the other dark voxels are bone.
+        ``min_air_ml``, are air cavities; the other dark voxels are bone if they lie within
+      ``bone_max_mm`` of the brain (the skull), and soft tissue further out (None: no limit). Far
+      from the brain, dark voxels are mostly receive-coil fall-off in the neck and face, which
+      would otherwise become large blocks of bone.
 
     Returns an int16 label map with :data:`LABEL_BRAIN`, :data:`LABEL_SOFT_TISSUE`,
     :data:`LABEL_BONE` and :data:`LABEL_AIR` (outside the head as well).
@@ -326,9 +329,11 @@ def head_model(magnitude_e1: np.ndarray, brain_mask: np.ndarray, voxel_size,
         # give the cavities back the edge the opening took (geodesically, within the dark voxels)
         air = ndi.binary_dilation(air, iterations=max(int(round(air_opening_mm / vox.min())), 1), mask=dark)
     bone = dark & ~air
+    if bone_max_mm is not None:
+        bone &= ndi.distance_transform_edt(~brain, sampling=vox) <= bone_max_mm
 
     seg = np.full(e1.shape, LABEL_AIR, np.int16)
-    seg[inside & ~dark] = LABEL_SOFT_TISSUE
+    seg[inside & ~bone & ~air] = LABEL_SOFT_TISSUE
     seg[bone] = LABEL_BONE
     seg[air] = LABEL_AIR
     seg[brain] = LABEL_BRAIN
