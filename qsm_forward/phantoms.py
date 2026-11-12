@@ -121,6 +121,48 @@ R1_BRAIN = 0.9
 R1_SOFT_TISSUE = 1.0
 R1_BONE = 1.0
 
+# T1 (s) at 3 T per seg label inside the brain, approximate literature means: WM 0.85 and cortical
+# GM 1.35 (Wansapura et al., JMRI 1999; Marques et al., NeuroImage 2010, MP2RAGE), CSF 4.2 (Lu et
+# al., MRM 2005), venous blood 1.6 (Lu et al., MRM 2004), deep grey matter between GM and WM and
+# lower where iron is high (caudate 1.35, putamen 1.25, globus pallidus 0.95, thalamus 1.10, red
+# nucleus, substantia nigra 1.0, dentate 1.05; Marques 2010 and Wright et al., MAGMA 2008 give
+# values in these ranges). Used for the steady-state factor, so they matter only when the
+# phantom is simulated with a TR or flip angle other than the source's (M0 is S0 divided by the
+# factor, and re-simulating with the source protocol multiplies it back).
+T1_3T_BY_LABEL = {1: 1.35, 2: 0.95, 3: 1.25, 4: 1.0, 5: 1.05, 6: 1.0, 7: 1.10, 8: 0.85, 9: 1.35,
+                  10: 4.2, 11: 1.6}
+R1_BY_LABEL = {k: 1.0 / v for k, v in T1_3T_BY_LABEL.items()}
+
+# FreeSurfer aseg ids (SynthSeg output) -> the head phantom's labels (1 caudate, 2 globus pallidus,
+# 3 putamen, 7 thalamus, 8 white matter, 9 grey matter, 10 CSF), the scheme QSM-CI's region
+# metrics read. Brainstem (16) and ventral diencephalon (28/60) are mostly white matter and go to 8;
+# the red nucleus (4), dentate (5) and substantia nigra (6) are not in aseg and must come from
+# another atlas (``seg_from_freesurfer(..., overrides=...)``). Hippocampus, amygdala and
+# accumbens go to grey matter, choroid plexus to CSF.
+FREESURFER_TO_PHANTOM = {
+    2: 8, 41: 8, 7: 8, 46: 8, 16: 8, 28: 8, 60: 8,
+    3: 9, 42: 9, 8: 9, 47: 9, 17: 9, 53: 9, 18: 9, 54: 9, 26: 9, 58: 9,
+    4: 10, 43: 10, 5: 10, 44: 10, 14: 10, 15: 10, 24: 10, 31: 10, 63: 10,
+    10: 7, 49: 7, 11: 1, 50: 1, 13: 2, 52: 2, 12: 3, 51: 3,
+}
+
+
+def seg_from_freesurfer(aseg: np.ndarray, overrides: Sequence = ()) -> np.ndarray:
+    """Map a FreeSurfer/SynthSeg label map to the head phantom's brain labels.
+
+    Unknown non-zero ids become :data:`LABEL_BRAIN`. ``overrides`` is a sequence of
+    ``(bool mask, label)`` applied in order on top (e.g. red nucleus, dentate and substantia nigra
+    from a χ atlas, which aseg does not have)."""
+    a = np.asarray(aseg).astype(np.int32)
+    lut = np.zeros(max(int(a.max()), max(FREESURFER_TO_PHANTOM)) + 1, np.int16)
+    lut[1:] = LABEL_BRAIN
+    for k, v in FREESURFER_TO_PHANTOM.items():
+        lut[k] = v
+    out = lut[np.clip(a, 0, None)]
+    for m, lab in overrides:
+        out[np.asarray(m, bool)] = lab
+    return out
+
 # ---------------------------------------------------------------------------------------------
 # small helpers
 
@@ -728,8 +770,15 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
         S0 = mag[..., 0] * np.exp(np.asarray(R2star if R2star is not None else 0.0) * float(TEs[0]))
         r2s = np.asarray(R2star if R2star is not None else np.zeros(chi.shape), np.float32)
 
+    seg_full = labels.copy()
+    if seg is not None:
+        s = np.asarray(seg).astype(np.int16)
+        seg_full[target] = np.where(s[target] > 0, s[target], LABEL_BRAIN)
+
     R1 = np.zeros(chi.shape, np.float32)
     R1[labels == LABEL_BRAIN] = R1_BRAIN
+    for lab, r1 in R1_BY_LABEL.items():
+        R1[target & (seg_full == lab)] = r1
     R1[labels == LABEL_SOFT_TISSUE] = R1_SOFT_TISSUE
     R1[labels == LABEL_BONE] = R1_BONE
     ss = np.where(R1 > 0, spgr_factor(np.where(R1 > 0, R1, 1.0), TR, flip_angle), 1.0)
@@ -753,11 +802,6 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     chi_full[st] = CHI_SOFT_TISSUE_PPM
     chi_full[bo] = CHI_BONE_PPM
     chi_full[air] = CHI_AIR_PPM
-
-    seg_full = labels.copy()
-    if seg is not None:
-        s = np.asarray(seg).astype(np.int16)
-        seg_full[target] = np.where(s[target] > 0, s[target], LABEL_BRAIN)
 
     fov = [[0, int(n)] for n in chi.shape]
     arrays = dict(chi=chi_full, M0=M0, R1=R1, R2star=r2.astype(np.float32), mask=target, seg=seg_full,
@@ -1259,3 +1303,366 @@ def simulate(phantom: Union[Phantom, str], recon_params: ReconParams, bids_dir: 
             "totalfield": os.path.join(danat, f"{rn}_fieldmap.nii"),
             "localfield": os.path.join(danat, f"{rn}_fieldmap-local.nii"),
             "cropped": bool(needs_crop)}
+
+
+# ---------------------------------------------------------------------------------------------
+# simulating on a grid other than the truth's (no inverse crime)
+
+
+def _affine_zoom(a, factor, shape, order):
+    """Resample ``a`` onto a grid ``factor`` times finer, origin-aligned: output index ``o`` reads
+    input position ``o / factor`` (the convention of qsm-forward's ``resize`` and k-space cropping:
+    voxel 0 of both grids has the same centre)."""
+    return ndi.affine_transform(np.asarray(a, np.float32), np.full(3, 1.0 / factor), offset=0.0,
+                                output_shape=tuple(shape), order=order, mode="nearest",
+                                prefilter=order > 1).astype(np.float32)
+
+
+def upsample_phantom(phantom: Phantom, factor: float = 1.5, chi_order: int = 3,
+                     label_sigma_vox: float = 0.6) -> Phantom:
+    """The phantom on a grid ``factor`` times finer, so a simulation there and a k-space crop
+    back to the source resolution has partial-volume and sub-voxel effects that the truth's own
+    grid cannot represent (the inverse crime of simulating on the truth's grid).
+
+    - head classes (air, bone, soft tissue, brain): each class indicator is smoothed by
+      ``label_sigma_vox`` source voxels, interpolated linearly and the most likely class taken, so
+      the air, bone and brain boundaries are smooth curves at the fine resolution rather than
+      1 mm staircases;
+    - χ inside the brain: cubic spline of the source map extended outward by its nearest brain
+      value (no ringing at the edge); outside, the class values (air, bone, soft tissue);
+    - brain labels, ``filled`` and source labels: nearest neighbour; M0 and R2*: linear, then air
+      set to zero and bone clipped as in :func:`build_invivo_phantom`; R1 from the labels.
+
+    Strong sources should be inserted after upsampling, so their edges have fine partial volume.
+    ``factor * shape`` must be whole numbers on every axis (e.g. 1.5 with even shapes).
+    """
+    f = float(factor)
+    ph = phantom
+    shape = []
+    for n in ph.chi.shape:
+        m = n * f
+        if abs(m - round(m)) > 1e-6:
+            raise ValueError(f"factor {f} x shape {ph.chi.shape} is not a whole grid; pad the phantom first")
+        shape.append(int(round(m)))
+    vox = ph.voxel_size / f
+    brain = ph.mask.astype(bool)
+    head_lab = np.where(brain, LABEL_BRAIN, ph.seg)
+    head_lab = np.where(np.isin(head_lab, (LABEL_AIR, LABEL_BONE, LABEL_SOFT_TISSUE, LABEL_BRAIN)), head_lab, LABEL_SOFT_TISSUE)
+    classes = (LABEL_AIR, LABEL_BONE, LABEL_SOFT_TISSUE, LABEL_BRAIN)
+    best = None
+    cls = np.zeros(shape, np.int16)
+    for c in classes:
+        p = _affine_zoom(ndi.gaussian_filter((head_lab == c).astype(np.float32), label_sigma_vox), f, shape, 1)
+        if best is None:
+            best, cls[:] = p, c
+        else:
+            better = p > best
+            cls[better] = c
+            best = np.maximum(best, p)
+    del best
+    fbrain = cls == LABEL_BRAIN
+
+    # brain values extended outward by their nearest brain voxel before interpolation
+    _, idx = ndi.distance_transform_edt(~brain, return_indices=True)
+    near = tuple(idx)
+    del idx
+    chi_b = ph.chi[near]
+    seg_b = np.where(brain, ph.seg, 0)[near]
+    del near
+    chi = _affine_zoom(chi_b, f, shape, chi_order)
+    del chi_b
+    chi[cls == LABEL_AIR] = CHI_AIR_PPM
+    chi[cls == LABEL_BONE] = CHI_BONE_PPM
+    chi[cls == LABEL_SOFT_TISSUE] = CHI_SOFT_TISSUE_PPM
+    seg_brain = _affine_zoom(seg_b, f, shape, 0).astype(np.int16)
+    seg = np.where(fbrain, seg_brain, cls).astype(np.int16)
+    del seg_brain
+
+    M0 = np.maximum(_affine_zoom(ph.M0, f, shape, 1), 0.0)
+    R2 = np.maximum(_affine_zoom(ph.R2star, f, shape, 1), 0.0)
+    m0_brain = float(np.median(ph.M0[brain]))
+    bone = cls == LABEL_BONE
+    M0[bone] = np.minimum(M0[bone], 0.15 * m0_brain)
+    R2[bone] = np.clip(R2[bone], 100.0, 500.0)
+    air = cls == LABEL_AIR
+    M0[air] = 0.0
+    R2[air] = 0.0
+    R1 = np.zeros(shape, np.float32)
+    R1[fbrain] = R1_BRAIN
+    for lab, r1 in R1_BY_LABEL.items():
+        R1[fbrain & (seg == lab)] = r1
+    R1[cls == LABEL_SOFT_TISSUE] = R1_SOFT_TISSUE
+    R1[bone] = R1_BONE
+
+    nearest = lambda a: None if a is None else _affine_zoom(a, f, shape, 0)  # noqa: E731
+    filled = nearest(ph.filled)
+    src = nearest(ph.source_labels)
+    affine = ph.affine.copy()
+    affine[:3, :3] = affine[:3, :3] / f
+    meta = dict(ph.meta)
+    meta.pop("saved_to", None)
+    meta["upsampled"] = {"factor": f, "from_shape": list(ph.chi.shape), "from_voxel_size": ph.voxel_size.tolist(),
+                         "chi_order": chi_order, "label_sigma_vox": label_sigma_vox}
+    fov = [[int(round(lo * f)), int(round(hi * f))] for lo, hi in ph.fov]
+    return Phantom(chi=chi, M0=M0, R1=R1, R2star=R2, mask=fbrain, seg=seg, voxel_size=vox, affine=affine,
+                   fov=fov, filled=None if filled is None else filled > 0.5,
+                   source_labels=None if src is None else src.astype(np.int16), sources=list(ph.sources), meta=meta)
+
+
+def _pv_matrix(n_src: int, n_dst: int, ratio: float) -> np.ndarray:
+    """Overlap weights (n_dst x n_src, rows sum to 1) of origin-aligned 1-D grids: destination voxel
+    j spans [j r - r/2, j r + r/2] in source-voxel units, source voxel i spans [i - 1/2, i + 1/2]."""
+    lo = np.arange(n_dst) * ratio - ratio / 2.0
+    hi = lo + ratio
+    s_lo = np.arange(n_src) - 0.5
+    W = np.clip(np.minimum(hi[:, None], s_lo[None] + 1.0) - np.maximum(lo[:, None], s_lo[None]), 0.0, None)
+    tot = W.sum(1, keepdims=True)
+    return (W / np.where(tot > 0, tot, 1.0)).astype(np.float32)
+
+
+def pv_resample(a: np.ndarray, ratio, shape) -> np.ndarray:
+    """Partial-volume (box) average of ``a`` onto a coarser origin-aligned grid of ``shape``,
+    ``ratio`` = destination voxel / source voxel per axis. Separable, so memory stays at about one
+    copy of the source array."""
+    out = np.asarray(a, np.float32)
+    for ax in range(3):
+        W = _pv_matrix(out.shape[ax], int(shape[ax]), float(np.atleast_1d(ratio)[ax] if np.ndim(ratio) else ratio))
+        out = np.moveaxis(np.tensordot(W, np.moveaxis(out, ax, 0), axes=(1, 0)), 0, ax)
+    return np.ascontiguousarray(out, np.float32)
+
+
+def dipole_field(chi: np.ndarray, voxel_size, B0_dir=(0.0, 0.0, 1.0), pad_mm: float = 60.0,
+                 pad_value: Optional[float] = None, mask: Optional[np.ndarray] = None, workers: int = 2) -> np.ndarray:
+    """Field (ppm) of a χ map (ppm): F^-1[D(k) F[χ]] with D = 1/3 - (k·b)²/|k|², single precision.
+
+    The volume is padded by ``pad_mm`` per side (to an FFT-friendly size) with ``pad_value``
+    (default the corner voxel, i.e. outside air for a head phantom), which is what
+    :func:`qsm_forward.generate_field` does with a 2x pad, at a fraction of its memory. With
+    ``mask`` the mean over the mask is subtracted."""
+    from scipy import fft as sfft
+    vox = _vox(voxel_size)
+    b = np.asarray(B0_dir, float)
+    b = b / np.linalg.norm(b)
+    n = np.array(chi.shape)
+    shp = [sfft.next_fast_len(int(k + 2 * math.ceil(pad_mm / v)), real=True) for k, v in zip(n, vox)]
+    pv = float(chi[-1, -1, -1]) if pad_value is None else float(pad_value)
+    buf = np.full(shp, pv, np.float32)
+    buf[:n[0], :n[1], :n[2]] = chi
+    F = sfft.rfftn(buf, workers=workers)
+    del buf
+    kx = np.fft.fftfreq(shp[0], d=vox[0]).astype(np.float32)[:, None, None]
+    ky = np.fft.fftfreq(shp[1], d=vox[1]).astype(np.float32)[None, :, None]
+    kz = np.fft.rfftfreq(shp[2], d=vox[2]).astype(np.float32)[None, None, :]
+    for i in range(shp[0]):  # plane by plane: no full-size k-space temporaries
+        k2 = kx[i] ** 2 + ky[0] ** 2 + kz[0] ** 2
+        kb = kx[i] * b[0] + ky[0] * b[1] + kz[0] * b[2]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            D = np.where(k2 > 0, 1.0 / 3.0 - kb ** 2 / k2, 1.0 / 3.0).astype(np.float32)
+        F[i] *= D
+    out = sfft.irfftn(F, s=shp, workers=workers)[:n[0], :n[1], :n[2]].astype(np.float32)
+    del F
+    if mask is not None:
+        out -= np.float32(np.mean(out[np.asarray(mask, bool)]))
+    return out
+
+
+def _shim_fit(field, mask, order=2, stride=3):
+    """Order-``order`` polynomial (in normalised voxel coordinates) least-squares fitted to
+    ``field`` in ``mask`` (on every ``stride``-th voxel), evaluated everywhere; the scanner's shim."""
+    shape = field.shape
+    sub = tuple(slice(None, None, stride) for _ in range(3))
+    idx = np.nonzero(np.asarray(mask, bool)[sub])
+    coords = [(i * stride - (n - 1) / 2.0) / (n / 2.0) for i, n in zip(idx, shape)]
+    terms = [(p, q, r) for p in range(order + 1) for q in range(order + 1) for r in range(order + 1) if p + q + r <= order]
+    A = np.stack([coords[0] ** p * coords[1] ** q * coords[2] ** r for p, q, r in terms], 1)
+    c, *_ = np.linalg.lstsq(A, field[sub][idx].astype(np.float64), rcond=None)
+    ax = [((np.arange(n) - (n - 1) / 2.0) / (n / 2.0)).astype(np.float32) for n in shape]
+    fit = np.zeros(shape, np.float32)
+    for (p, q, r), ci in zip(terms, c):
+        fit += np.float32(ci) * (ax[0][:, None, None] ** p) * (ax[1][None, :, None] ** q) * (ax[2][None, None, :] ** r)
+    return fit
+
+
+def _phase_offset(M0, mask):
+    """The quadratic receive-phase offset of :func:`qsm_forward.generate_phase_offset`, without
+    full-size coordinate grids."""
+    a = np.abs(M0).astype(np.float64)
+    tot = a.sum()
+    c, w = [], []
+    for ax in range(3):
+        prof = a.sum(axis=tuple(i for i in range(3) if i != ax))
+        x = np.arange(1, a.shape[ax] + 1)
+        ck = float((prof * x).sum() / tot)
+        c.append(ck)
+        w.append(float(np.sqrt((prof * (x - ck) ** 2).sum() / tot)))
+    g = [((np.arange(1, n + 1) - ck) / wk).astype(np.float32) ** 2 for n, ck, wk in zip(a.shape, c, w)]
+    temp = g[0][:, None, None] + g[1][None, :, None] + g[2][None, None, :]
+    m = np.asarray(mask, bool)
+    rng_ = float(temp[m].max() - temp[m].min())
+    return (-temp / rng_ * np.pi).astype(np.float32)
+
+
+def _kspace_crop(sig, shape, workers=2):
+    """Centred k-space crop of a complex volume to ``shape`` (qsm-forward's crop_kspace convention
+    and energy scaling), single precision."""
+    from scipy import fft as sfft
+    from .qsm_forward import crop_imagespace
+    F = sfft.fftshift(sfft.fftn(sig, workers=workers))
+    F = np.ascontiguousarray(crop_imagespace(F, shape))
+    out = sfft.ifftn(sfft.ifftshift(F), workers=workers)
+    return (out * np.float32(np.prod(shape) / np.prod(sig.shape))).astype(np.complex64)
+
+
+def simulate_acquisition(phantom: Union[Phantom, str], bids_dir: str, TEs: Sequence[float], B0: float = 3.0,
+                         TR: float = 0.035, flip_angle: float = 15.0, voxel_size=(1.0, 1.0, 1.0),
+                         B0_dir=(0.0, 0.0, 1.0), noise_sigma: Optional[float] = None, seed: int = 0,
+                         subject: str = "1", shim_order: Optional[int] = 2, phase_offset: bool = True,
+                         crop: bool = True, pad_mm: float = 60.0, workers: int = 2) -> dict:
+    """Simulate a multi-echo GRE acquisition of a (fine-grid) phantom on a coarser acquisition grid.
+
+    The signal is computed on the phantom's grid and reduced to the acquisition matrix by k-space
+    cropping, as :class:`qsm_forward.ReconGrid` does; the reference maps on the acquisition grid
+    are partial-volume averages of the phantom's (χ, true total/shimmed/local field), so they are
+    what a voxel of that size contains, not samples of the simulation grid. With an upsampled phantom
+    (:func:`upsample_phantom`) this avoids the inverse crime of simulating on the truth's grid.
+
+    Signal: M0 · SPGR(R1, TR, flip) · exp(-TE R2*) · exp(i (2π γ B0 TE Δf_shimmed + φ0)), with the
+    total field from :func:`dipole_field` (single precision, padded by ``pad_mm``), a fitted
+    order-``shim_order`` shim removed, and the quadratic receive-phase offset of
+    :func:`qsm_forward.generate_phase_offset` if ``phase_offset``.
+
+    Noise: complex Gaussian with standard deviation ``noise_sigma`` per channel, in the signal's
+    own units (M0 from :func:`build_invivo_phantom` is in the source magnitude's units, so a σ
+    measured on the source data applies directly); None writes noiseless data, and
+    :func:`add_bids_noise` can add it afterwards.
+
+    Writes the layout of :func:`simulate` (``sub-<subject>/anat/*_echo-N_part-{mag,phase}_MEGRE.nii``
+    with sidecars; derivatives ``*_Chimap``, ``*_mask``, ``*_dseg``, ``*_fieldmap`` (total),
+    ``*_desc-shimmed_fieldmap``, ``*_fieldmap-local``, ``*_desc-sources_dseg``, ``*_phantom.json``)
+    and crops to the source field of view. χ on the acquisition grid is the mean over the brain part
+    of each voxel inside the acquisition mask (partial volume >= 0.5); the true local field is that
+    of χ inside the phantom's brain mask.
+    """
+    ph = Phantom.load(phantom) if isinstance(phantom, str) else phantom
+    TEs = [float(t) for t in TEs]
+    fvox = ph.voxel_size
+    fshape = np.array(ph.chi.shape)
+    acq_req = _vox(voxel_size)
+    ashape = np.maximum(np.round(fshape * fvox / acq_req).astype(int), 1)
+    avox = fshape * fvox / ashape
+    ratio = avox / fvox
+    mask = ph.mask.astype(bool)
+
+    total = dipole_field(ph.chi, fvox, B0_dir, pad_mm=pad_mm, mask=mask, workers=workers)
+    local = dipole_field(np.where(mask, ph.chi, 0.0).astype(np.float32), fvox, B0_dir, pad_mm=pad_mm,
+                         pad_value=0.0, mask=mask, workers=workers)
+    shim = _shim_fit(total, mask, shim_order) if shim_order is not None else np.zeros_like(total)
+    sig_field = total - shim
+    phi0 = _phase_offset(ph.M0, mask) if phase_offset else np.float32(0.0)
+
+    # reference maps on the acquisition grid
+    pvm = pv_resample(mask.astype(np.float32), ratio, ashape)
+    amask = pvm >= 0.5
+    chi_b = pv_resample(np.where(mask, ph.chi, 0.0), ratio, ashape) / np.maximum(pvm, 1e-6)
+    chi_all = pv_resample(ph.chi, ratio, ashape)
+    chi_acq = np.where(amask, chi_b, chi_all).astype(np.float32)
+    del chi_b, chi_all
+    maps = {"Chimap": chi_acq, "mask": amask.astype(np.uint8),
+            "fieldmap": pv_resample(total, ratio, ashape),
+            "desc-shimmed_fieldmap": pv_resample(sig_field, ratio, ashape),
+            "fieldmap-local": pv_resample(local, ratio, ashape)}
+    del total, local, shim
+    near = tuple(np.clip(np.round(np.arange(n) * r).astype(int), 0, m - 1) for n, r, m in zip(ashape, ratio, fshape))
+    ix = np.ix_(*near)
+    maps["dseg"] = ph.seg[ix].astype(np.int16)
+    if ph.source_labels is not None:
+        maps["desc-sources_dseg"] = ph.source_labels[ix].astype(np.int16)
+
+    aff = ph.affine.copy()
+    aff[:3, :3] = ph.affine[:3, :3] * ratio[None, :]
+    box = tuple(slice(0, int(n)) for n in ashape)
+    if crop:
+        box = tuple(slice(int(round(lo / r)), int(round(hi / r))) for (lo, hi), r in zip(ph.fov, ratio))
+        aff[:3, 3] = aff[:3, :3] @ np.array([b.start for b in box]) + aff[:3, 3]
+
+    rn = f"sub-{subject}"
+    anat = os.path.join(bids_dir, rn, "anat")
+    danat = os.path.join(bids_dir, "derivatives", "qsm-forward", rn, "anat")
+    os.makedirs(anat, exist_ok=True)
+    os.makedirs(danat, exist_ok=True)
+
+    def save(a, path, dtype=np.float32):
+        img = nib.Nifti1Image(np.asarray(a[box]).astype(dtype), aff)
+        img.header.set_zooms(tuple(float(v) for v in avox))
+        nib.save(img, path)
+
+    for name, a in maps.items():
+        save(a, os.path.join(danat, f"{rn}_{name}.nii"), np.int16 if "dseg" in name else (np.uint8 if name == "mask" else np.float32))
+
+    ss = np.where(ph.R1 > 0, spgr_factor(np.where(ph.R1 > 0, ph.R1, 1.0), TR, flip_angle), 0.0).astype(np.float32)
+    base = (ph.M0 * ss).astype(np.float32)
+    del ss
+    rng = np.random.default_rng(seed)
+    gamma = 42.58  # MHz/T, as generate_signal
+    echo_stats = []
+    for i, te in enumerate(TEs, 1):
+        sig = base * np.exp(np.float32(-te) * ph.R2star)
+        sig = sig * np.exp(1j * (np.float32(2 * np.pi * gamma * B0 * te) * sig_field + phi0)).astype(np.complex64)
+        acq = _kspace_crop(sig.astype(np.complex64), tuple(int(n) for n in ashape), workers)
+        del sig
+        acq = acq[box]
+        if noise_sigma:
+            acq = acq + (rng.standard_normal(acq.shape, np.float32) + 1j * rng.standard_normal(acq.shape, np.float32)) * np.float32(noise_sigma)
+        echo_stats.append(float(np.median(np.abs(acq)[amask[box]])))
+        side = {"EchoTime": te, "MagneticFieldStrength": B0, "EchoNumber": i, "RepetitionTime": TR,
+                "FlipAngle": flip_angle, "B0_dir": [float(v) for v in B0_dir], "VoxelSize": avox.tolist(),
+                "ConversionSoftware": "qsm-forward phantoms.simulate_acquisition",
+                "NoiseSigma": float(noise_sigma or 0.0), "PhantomVoxelSize": fvox.tolist()}
+        for part, v in (("mag", np.abs(acq)), ("phase", np.angle(acq))):
+            img = nib.Nifti1Image(v.astype(np.float32), aff)
+            img.header.set_zooms(tuple(float(x) for x in avox))
+            nib.save(img, os.path.join(anat, f"{rn}_echo-{i}_part-{part}_MEGRE.nii"))
+            with open(os.path.join(anat, f"{rn}_echo-{i}_part-{part}_MEGRE.json"), "w") as fh:
+                json.dump(dict(side, ImageType=["P", "PHASE"] if part == "phase" else ["M", "MAGNITUDE"]), fh, indent=1)
+    dd = os.path.join(bids_dir, "dataset_description.json")
+    if not os.path.exists(dd):
+        with open(dd, "w") as fh:
+            json.dump({"Name": "qsm-forward phantom", "BIDSVersion": "1.9.0"}, fh)
+    sim = {"acq_shape": [int(b.stop - b.start) for b in box], "acq_voxel_size": avox.tolist(),
+           "phantom_voxel_size": fvox.tolist(), "phantom_shape": fshape.tolist(), "TEs": TEs, "B0": B0,
+           "TR": TR, "flip_angle": flip_angle, "B0_dir": [float(v) for v in B0_dir],
+           "noise_sigma": float(noise_sigma or 0.0), "seed": int(seed), "shim_order": shim_order,
+           "phase_offset": bool(phase_offset), "median_brain_magnitude_per_echo": echo_stats,
+           "truth": "partial-volume mean over the acquisition voxel (brain part inside the mask)"}
+    with open(os.path.join(danat, f"{rn}_phantom.json"), "w") as fh:
+        json.dump({"sources": ph.sources, "simulation": sim,
+                   **{k: v for k, v in ph.meta.items() if k != "saved_to"},
+                   "phantom_dir": ph.meta.get("saved_to")}, fh, indent=1, default=_json_default)
+    return {"bids_dir": bids_dir, "anat": anat, "derivatives": danat, "recon_name": rn,
+            "chi": os.path.join(danat, f"{rn}_Chimap.nii"), "mask": os.path.join(danat, f"{rn}_mask.nii"),
+            "totalfield": os.path.join(danat, f"{rn}_fieldmap.nii"),
+            "localfield": os.path.join(danat, f"{rn}_fieldmap-local.nii"), "simulation": sim}
+
+
+def add_bids_noise(anat_dir: str, sigma: float, seed: int = 0, subject: str = "1") -> int:
+    """Add complex Gaussian noise (σ per channel, signal units) in place to the echoes that
+    :func:`simulate_acquisition` wrote without noise; records ``NoiseSigma`` in the sidecars.
+    Returns the number of echoes changed."""
+    rng = np.random.default_rng(seed)
+    n = 0
+    for mp in sorted(glob.glob(os.path.join(anat_dir, f"sub-{subject}_echo-*_part-mag_MEGRE.nii")),
+                     key=lambda p: int(p.split("_echo-")[1].split("_")[0])):
+        pp = mp.replace("part-mag", "part-phase")
+        mi, pi = nib.load(mp), nib.load(pp)
+        z = np.asarray(mi.dataobj, np.float32) * np.exp(1j * np.asarray(pi.dataobj, np.float32))
+        z = z + (rng.standard_normal(z.shape, np.float32) + 1j * rng.standard_normal(z.shape, np.float32)) * np.float32(sigma)
+        for path, v, img in ((mp, np.abs(z), mi), (pp, np.angle(z), pi)):
+            out = nib.Nifti1Image(v.astype(np.float32), img.affine, img.header)
+            nib.save(out, path)
+            js = path.replace(".nii", ".json")
+            if os.path.exists(js):
+                side = json.load(open(js))
+                side["NoiseSigma"] = float(sigma)
+                json.dump(side, open(js, "w"), indent=1)
+        n += 1
+    return n

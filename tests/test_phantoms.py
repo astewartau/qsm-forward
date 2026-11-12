@@ -7,6 +7,11 @@ import numpy as np
 import pytest
 
 from qsm_forward import ReconParams, phantoms
+from scipy import ndimage as ndi
+
+
+def ndi_dilate(m, n):
+    return ndi.binary_dilation(m, iterations=n)
 
 SHAPE = (40, 40, 32)
 VOX = (1.5, 1.5, 1.5)
@@ -206,3 +211,77 @@ def test_cut_faces_are_extended():
     assert ph.chi.shape[2] == SHAPE[2] - 3 + 8
     assert ph.fov[2] == [4, SHAPE[2] - 3 + 4]
     assert not ph.mask[:, :, -4:].any()
+
+
+def test_seg_from_freesurfer_and_tissue_r1():
+    aseg = np.array([[[0, 2, 3, 4, 11, 12, 13, 10, 16, 999]]])
+    rn = np.zeros(aseg.shape, bool)
+    rn[0, 0, 8] = True
+    out = phantoms.seg_from_freesurfer(aseg, overrides=[(rn, 4)])
+    assert out.ravel().tolist() == [0, 8, 9, 10, 1, 3, 2, 7, 4, phantoms.LABEL_BRAIN]
+    # FreeSurfer brainstem (16) must not become the calcification label
+    assert not np.any(out == phantoms.LABEL_CALCIFICATION)
+    chi, mag, brain, support, *_ = _synthetic_head()
+    seg = np.where(brain, 8, 0)
+    seg[brain & (np.indices(SHAPE)[0] < 20)] = 9
+    ph = phantoms.build_invivo_phantom(chi, mag, TES, VOX, brain, chi_support=support, seg=seg, neck_mm=0.0, cut_extend_mm=0.0)
+    assert np.allclose(ph.R1[seg == 8], phantoms.R1_BY_LABEL[8])
+    assert np.allclose(ph.R1[seg == 9], phantoms.R1_BY_LABEL[9])
+
+
+def test_pv_resample_and_dipole_field():
+    W = phantoms._pv_matrix(6, 4, 1.5)
+    assert np.allclose(W.sum(1), 1.0)
+    assert np.allclose(W[2], [0, 0, 1 / 6, 2 / 3, 1 / 6, 0], atol=1e-6)
+    a = np.zeros((30, 30, 30), np.float32)
+    a[9:21, 9:21, 9:21] = 1.0  # a block on a whole number of coarse voxels keeps its volume
+    b = phantoms.pv_resample(a, 1.5, (20, 20, 20))
+    assert b.shape == (20, 20, 20) and abs(b.sum() * 1.5 ** 3 - a.sum()) < 1e-3 * a.sum()
+    from qsm_forward.qsm_forward import generate_field
+    rng = np.random.default_rng(0)
+    chi = np.zeros((32, 34, 30), np.float32)
+    chi[8:24, 8:26, 8:22] = rng.normal(0, 0.05, (16, 18, 14))
+    m = chi != 0
+    ref = generate_field(chi, m, [1, 1, 1], [0, 0, 1])
+    got = phantoms.dipole_field(chi, (1, 1, 1), (0, 0, 1), pad_mm=30, mask=m)
+    assert np.linalg.norm(ref[m] - got[m]) < 1e-3 * np.linalg.norm(ref[m])
+
+
+def test_upsample_and_simulate_acquisition(tmp_path, built):
+    ph, src = built
+    fine = phantoms.upsample_phantom(ph, 1.5)
+    assert fine.chi.shape == tuple(int(n * 1.5) for n in ph.chi.shape)
+    assert np.allclose(fine.voxel_size, ph.voxel_size / 1.5)
+    assert fine.fov == [[int(lo * 1.5), int(hi * 1.5)] for lo, hi in ph.fov]
+    assert abs(fine.mask.sum() * np.prod(fine.voxel_size) - ph.mask.sum() * np.prod(ph.voxel_size)) < 0.05 * ph.mask.sum() * np.prod(ph.voxel_size)
+    assert np.all(fine.chi[fine.seg == phantoms.LABEL_AIR] == phantoms.CHI_AIR_PPM)
+    assert np.all(fine.M0[fine.seg == phantoms.LABEL_AIR] == 0)
+    with pytest.raises(ValueError):
+        phantoms.upsample_phantom(ph, 1.3)
+    fine = phantoms.insert_sources(fine, [phantoms.SourceSpec("calcification", count=1, radius_mm=2.0, chi_ppm=-2.0)], seed=0)
+    out = phantoms.simulate_acquisition(fine, str(tmp_path / "bids"), TES, B0=3, TR=0.035, flip_angle=15,
+                                        voxel_size=VOX, noise_sigma=None, pad_mm=20)
+    for key in ("chi", "mask", "totalfield", "localfield"):
+        assert nib.load(out[key]).shape == SHAPE, key
+    mag = nib.load(os.path.join(out["anat"], "sub-1_echo-1_part-mag_MEGRE.nii"))
+    assert mag.shape == SHAPE and np.allclose(mag.header.get_zooms()[:3], VOX)
+    chi = nib.load(out["chi"]).get_fdata()
+    mask = nib.load(out["mask"]).get_fdata() > 0
+    # partial-volume truth: the calcification is diluted, but its moment is kept
+    calc = fine.sources[0]
+    assert -2.0 < chi[mask].min() < -0.3
+    lab = nib.load(os.path.join(out["derivatives"], "sub-1_desc-sources_dseg.nii")).get_fdata()
+    assert lab.max() == 1
+    near = ndi_dilate(lab > 0, 3) & mask
+    base = chi.copy()
+    base[near] = np.median(chi[ndi_dilate(lab > 0, 5) & mask & ~near])
+    moment = float((chi - base)[near].sum() * np.prod(VOX) / 1000)
+    assert abs(moment - calc["moment_ppm_ml"]) < 0.25 * abs(calc["moment_ppm_ml"])
+    # noise added afterwards, in signal units
+    m1 = mag.get_fdata()
+    assert phantoms.add_bids_noise(out["anat"], 5.0, seed=1) == len(TES)
+    m2 = nib.load(os.path.join(out["anat"], "sub-1_echo-1_part-mag_MEGRE.nii")).get_fdata()
+    bright = m1 > 20 * 5.0  # Rician ~ Gaussian there
+    assert 4.5 < np.std((m2 - m1)[bright]) < 5.5
+    side = json.load(open(os.path.join(out["anat"], "sub-1_echo-1_part-mag_MEGRE.json")))
+    assert side["NoiseSigma"] == 5.0
