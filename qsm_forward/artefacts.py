@@ -155,10 +155,13 @@ def blob_region(shape, voxel, centre_vox, radius_mm, border="smooth", roughness=
 
 
 def signed_distance(mask, voxel):
-    """Signed distance (mm) to the boundary of ``mask``: negative inside, positive outside."""
+    """Signed distance (mm) to the surface of ``mask``, taken half a voxel outside its boundary
+    voxels: negative inside (−v/2 at a boundary voxel), positive outside (+v/2 just outside)."""
     voxel = _voxel(voxel)
     m = np.asarray(mask, bool)
-    return ndimage.distance_transform_edt(~m, sampling=voxel) - ndimage.distance_transform_edt(m, sampling=voxel)
+    h = 0.5 * float(np.mean(voxel))
+    return np.where(m, h - ndimage.distance_transform_edt(m, sampling=voxel),
+                    ndimage.distance_transform_edt(~m, sampling=voxel) - h)
 
 
 def mask_metrics(fault, ref, voxel):
@@ -169,9 +172,11 @@ def mask_metrics(fault, ref, voxel):
     r = np.asarray(ref, bool)
     sd = signed_distance(r, voxel)
     edge = f & ~ndimage.binary_erosion(f)
+    redge = r & ~ndimage.binary_erosion(r)
+    bias = float(sd[redge].mean()) if redge.any() else 0.0  # the reference against itself: 0
     inter = (f & r).sum()
     # an empty mask has no surface: report it as eroded to the deepest point of the reference
-    msd = float(sd[edge].mean()) if edge.any() else (float(sd[r].min()) if r.any() else 0.0)
+    msd = (float(sd[edge].mean()) if edge.any() else (float(sd[r].min()) if r.any() else 0.0)) - bias
     return {"excess_ml": _ml((f & ~r).sum(), voxel), "missing_ml": _ml((r & ~f).sum(), voxel),
             "dice": float(2 * inter / max(f.sum() + r.sum(), 1)), "mean_signed_surface_distance_mm": msd}
 

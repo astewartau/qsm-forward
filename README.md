@@ -338,6 +338,41 @@ Per-echo χ (`*_Chimap-echoes`) gets each echo's own noise and, at L2+, the same
 
 Each level is written as `*_desc-degraded<L>_{fieldmap-local,Chimap,Chimap-echoes,R2prime,mask}.nii` with `*_desc-degraded<L>_degradation.json` (every parameter, the seed, the version). All levels share one noise seed. Each parameter is the median over six QSMxT pipelines (iLSQR, TKD, NLTV, MEDI, TFI, iR2QSM) run on the `meso-3t` phantom; its range across them is in the sidecar (`CalibrationSpread`) and `qsm_forward.degrade.CALIBRATION_SPREAD`. `--set PARAM=VALUE` overrides any of them. The LUT signal models also write `*_desc-subvoxel_fieldmap.nii`: the frequency an ideal field fit measures beyond the dipole field.
 
+### Artefact injection with known labels
+
+`qsm_forward.artefacts` makes deliberately degraded data with known labels, as training and test data for reference-free QSM quality assessment. Each effect is a function that returns the modified data, a label and, for local effects, a voxelwise `affected` map. The label holds the effect, the failure-taxonomy rows it reproduces, the quality sub-score it feeds, its severity in physical units, every parameter and the seed. `artefacts.EFFECTS` lists every effect with a severity ladder that runs from negligible to gross. `artefacts.write_labels(path, labels)` writes a JSON sidecar of everything applied.
+
+| Effect | Acts on | Severity (label) | Sub-score |
+|---|---|---|---|
+| `gross_sign` | χ | sign flipped | GROSS |
+| `gross_scale` (`factor`, or `cause`: `ppb_as_ppm`, `hz_as_ppm`, `rad_per_s_as_hz`, `missing_te`, `te_ms_as_s`, `b0_7t_as_3t`, `b0_2p89_as_3`, …) | χ | \|log10 factor\| | GROSS (≥ 1.5×), CALIB (smaller) |
+| `gross_axes` (`flip`, `permute`) | χ | axes flipped or permuted | GROSS |
+| `gross_wrong_b0` (`b0_true`, `b0_assumed`) | χ (forward with the true B0, TKD with the assumed one) | B0 direction error, degrees | GROSS (≥ 30°), CONE |
+| `gross_quantise` (`step_ppm`, `clip_ppm`) | χ | step, ppb; clipped fraction | GROSS |
+| `gross_nonfinite` (`n_patches`, `radius_mm`, `value`) | χ | non-finite voxels | GROSS |
+| `chi_offset` (`offset_ppm`) | χ | \|offset\|, ppb | CALIB (reported, not scored) |
+| `mask_dilate`, `mask_erode` (`mm`, `irregularity`, `within`) | mask | mean signed surface distance, mm; excess/missing mL; Dice | EDGE |
+| `mask_holes` (`n_holes`, `radius_mm`, `prior`) | mask | hole volume, mL | EDGE |
+| `mask_plane_cut` (`depth_mm`, `normal`) | mask | missing volume, mL | EDGE |
+| `mask_islands` (`n_islands`, `radius_mm`, `gap_mm`, `within`) | mask | island volume, mL | EDGE |
+| `mask_misregister` (`shift_mm`, `rot_deg`, `flip_axis`) | mask | maximum displacement, mm; Dice | EDGE |
+| `unwrap_patch` (`k`, `radius_mm`, `n_patches`, `border` smooth/ragged, `ring_width_mm` for rings, `echoes`) | unwrapped phase, or field map (`domain='field'`, `te`) | mis-unwrapped volume, mL; jump in 2π cycles | LOCAL |
+| `unwrap_slicewise` (`axis`, `fraction`, `k_max`) | unwrapped phase or field map | mis-unwrapped volume, mL | LOCAL |
+| `unwrap_echo_error` (`echo`, `k`, `radius_mm`; None for the whole mask) | unwrapped phase | affected volume, mL; field error, Hz | LOCAL |
+| `interecho_motion` (`rot_deg`, `trans_mm` per echo; `mode` progressive/random) | complex echoes | RMS displacement from echo 1, mm; per-echo transforms | LOCAL |
+| `slicewise_motion` (`axis`, `max_shift_mm`, `fraction`) | complex echoes | RMS in-plane displacement, mm | LOCAL |
+| `within_echo_motion` (`pe_axis`, `onset`, `rot_deg`, `trans_mm`) | complex echoes (k-space lines after `onset` from a moved copy) | ghost energy, % | LOCAL |
+| `bipolar_readout` (`gradient_rad_per_mm`, `offset_rad`, `shift_voxels`, `readout_axis`) | complex echoes (even echoes) | odd–even phase gradient, rad/mm | BKG |
+| `kspace_spike` (`amplitude`, `position`, `echoes`) | complex echoes | spike / \|S(k=0)\|; stripe wavelength | NOISE |
+| `partial_fourier` (`axis`, `fraction`, `method` zerofill/homodyne) | complex echoes | missing k-space fraction | RES |
+| `phase_highpass` (`sigma_mm`) | complex echoes (SWI-style homodyne filter) | cut-off, cycles/mm | CALIB |
+
+`chi_under_mask` shows a faulty mask on a χ map. It fills the voxels the mask wrongly takes in with a stand-in for outside-brain junk: smooth plus noisy, scaled by 1/magnitude. A real pipeline run on the complex data with the faulty mask gives the real junk. The head phantom has scalp and skull signal and whole-head χ, so its field outside the brain is real; the `simple` and `chi-sep` phantoms (brain-masked χ) have none.
+
+Geometric operations on complex data resample the real and imaginary parts, never the wrapped phase. When the head moves, its field moves with it as a rigid pattern. The change of the dipole field with head orientation and the scanner-fixed shim field are not simulated again. That is second order for a few degrees. Wrapped phase cannot carry an unwrapping error, so a pipeline has to start from the unwrapped phase or field map that carries it.
+
+`qsm-forward artefacts BIDS OUT --effect NAME[:key=value,...] [--effect ...]` copies a phantom and applies effects in order: complex-echo effects rewrite the GRE, mask effects write `*_desc-fault_mask.nii`, field-domain unwrapping errors are applied to `*_fieldmap.nii` (`--save-field`) as `*_desc-fault_fieldmap.nii`, and `sidecar:te_factor=…,b0=…,b0_dir=[…]` edits the echo sidecars. Values are JSON. The labels go to `OUT/artefacts.json`. For example, `--effect interecho_motion:rot_deg=2.5,trans_mm=1 --effect mask_dilate:mm=4,irregularity=0.5`.
+
 The Python `generate_bids(...)` example below shows the lower-level API (a single Dr kernel, no orientation dependence); the `chi-sep` subcommand wraps `generate_dr_maps_ridani` to build the source- and orientation-dependent relaxivity described later.
 
 ```python
