@@ -2,7 +2,7 @@
 
 import argparse
 import qsm_forward
-from qsm_forward import chisep, degrade
+from qsm_forward import artefacts, chisep, degrade
 import numpy as np
 
 
@@ -114,6 +114,8 @@ def main():
     degrade_parser.add_argument('--set', nargs='+', default=[], metavar='PARAM=VALUE',
                                 help='Override a degradation parameter at every level (e.g. chi_lowk_loss=0.3)')
 
+    artefacts.add_subparser(subparsers)
+
     head_parser.add_argument('data', help='Head phantom data directory (download from https://doi.org/10.34973/m20r-jt17)')
     chisep_parser.add_argument('data', help='Head phantom data directory; must also contain maps/V1.nii.gz and masks/white_matter_mask.nii.gz for anisotropy, and raw/rawField.nii.gz')
 
@@ -168,6 +170,9 @@ def main():
                                     'to resample into the derivatives')
 
     args = parser.parse_args()
+
+    if args.mode == 'artefacts':
+        return artefacts.run_cli(args)
 
     if args.mode == 'degrade':
         written = degrade.degrade_bids(args.bids, args.levels, subject=args.subject, seed=args.seed,
