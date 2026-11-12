@@ -369,7 +369,8 @@ def _radial_profile(P, kr, edges):
 
 
 def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_size,
-              B0_dir=(0.0, 0.0, 1.0), despike_sd: Optional[float] = 6.0, cone_clamp: bool = True,
+              B0_dir=(0.0, 0.0, 1.0), despike_sd: Optional[float] = 8.0, despike_rim_mm: float = 3.0,
+              despike_max_size: int = 2, cone: Optional[str] = "clamp", cone_max_gain: float = 2.0,
               cone_halfwidth_deg: float = 8.0, cone_iterations: int = 3, denoise: Optional[str] = "wiener",
               denoise_strength: float = 1.0, tv_weight: float = 0.004, reference: str = "median"):
     """Turn an in vivo χ map into a χ truth (see the module docstring for the steps).
@@ -386,9 +387,19 @@ def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_si
     B0_dir : sequence of float
         B0 direction of the source reconstruction in voxel coordinates (for the cone clamp).
     despike_sd : float or None
-        Replace voxels further than this many robust SDs from their 3x3x3 median; None skips.
-    cone_clamp : bool
-        Scale magic-cone power down to the off-cone power at the same |k|.
+        Outliers are voxels further than this many robust SDs from their 3x3x3 median; None
+        skips de-spiking. Outliers within ``despike_rim_mm`` of the support edge (where
+        background-field removal leaves its errors) are all replaced by the median; deeper in,
+        only isolated ones (26-connected same-sign clusters of at most ``despike_max_size``
+        voxels), so veins and other thin real structures are kept.
+    despike_rim_mm, despike_max_size : float, int
+    cone : {"clamp", "equalise", None}
+        "clamp": scale magic-cone power DOWN to the off-cone power at the same |k| (removes
+        streaking, leaves a cone deficit alone). "equalise": also scale it UP, by at most
+        ``cone_max_gain`` in amplitude, which restores isotropic spectral statistics to sources
+        whose inversion suppressed the cone (iLSQR, TV, TKD/TSVD) by amplifying the cone content
+        they kept. None: leave the cone alone.
+    cone_max_gain : float
     cone_halfwidth_deg : float
         Angular half-width of the clamped band (raised-cosine taper to zero at this angle).
     cone_iterations : int
@@ -417,15 +428,26 @@ def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_si
     info = {"support_voxels": int(support.sum()), "target_voxels": int(target.sum()),
             "filled_fraction": float((target & ~support).sum() / max(target.sum(), 1))}
 
-    # 2. de-spike
+    # 2. de-spike: everything in the rim, only isolated outliers inside
     if despike_sd is not None:
         filled = _fill_outside(chi, support, support, vox, texture_mm=0.0)
         med = ndi.median_filter(filled, size=3)
         r = chi - med
         sd = _robust_std(r[support])
-        spikes = support & (np.abs(r) > despike_sd * sd)
+        out = support & (np.abs(r) > despike_sd * sd)
+        rim = support & (ndi.distance_transform_edt(support, sampling=vox) <= despike_rim_mm)
+        isolated = np.zeros_like(out)
+        for sign in (1, -1):
+            lab, n = ndi.label(out & (sign * r > 0), structure=np.ones((3, 3, 3)))
+            if n:
+                sizes = np.bincount(lab.ravel(), minlength=n + 1)
+                small = sizes <= despike_max_size
+                small[0] = False
+                isolated |= small[lab]
+        spikes = (out & rim) | isolated
         chi = np.where(spikes, med, chi)
         info["spike_fraction"] = float(spikes.sum() / support.sum())
+        info["spike_fraction_rim"] = float((spikes & rim).sum() / max(rim.sum(), 1))
         info["spike_threshold_ppm"] = float(despike_sd * sd)
 
     # 3. fill the gap (and, smoothly, everything else, so the filters see no step at the edge)
@@ -454,7 +476,9 @@ def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_si
         mx = float(10 * np.log10(np.max(np.maximum(ratio[band], 1e-12)))) if band.any() else 0.0
         return kc, ratio, med, mx
 
-    if cone_clamp:
+    if cone not in ("clamp", "equalise", None):
+        raise ValueError(f"cone must be 'clamp', 'equalise' or None, got {cone!r}")
+    if cone is not None:
         w_ang = np.where(dev < cone_halfwidth_deg, 0.5 * (1 + np.cos(np.pi * dev / cone_halfwidth_deg)), 0.0)
         w_ang = np.where(dev < 0.5 * cone_halfwidth_deg, 1.0, w_ang)
         # measured on the brain-masked map (what a metric sees); the clamp is applied to the
@@ -464,7 +488,10 @@ def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_si
         for _it in range(int(cone_iterations)):
             F = np.fft.fftn(work)
             kc, ratio, _m, _x = cone_ratio(F)
-            gain_shell = np.where(ratio > 1.0, 1.0 / np.sqrt(ratio), 1.0)
+            if cone == "clamp":
+                gain_shell = np.where(ratio > 1.0, 1.0 / np.sqrt(ratio), 1.0)
+            else:
+                gain_shell = np.clip(1.0 / np.sqrt(np.maximum(ratio, 1e-12)), 0.0, cone_max_gain)
             g_k = np.interp(kr, kc, gain_shell, left=1.0, right=gain_shell[-1])
             F *= 1.0 - (1.0 - g_k) * w_ang
             work = np.real(np.fft.ifftn(F))
@@ -508,7 +535,7 @@ def clean_chi(chi: np.ndarray, support: np.ndarray, target: np.ndarray, voxel_si
     elif reference is not None:
         raise ValueError(f"reference must be 'median', 'mean' or None, got {reference!r}")
     info["denoise"] = denoise
-    info["cone_clamp"] = bool(cone_clamp)
+    info["cone"] = cone
     return out.astype(np.float32), info
 
 
@@ -650,7 +677,7 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     affine : ndarray, optional
         Voxel-to-world affine of the source (diag(voxel_size) if None).
     chi_support : ndarray of bool, optional
-        Where the source χ is valid; default its finite non-zero voxels.
+        Where the source χ is valid; default its largest finite non-zero component, holes filled.
     TR, flip_angle : float
         Source protocol (s, degrees), to divide the steady-state factor out of M0.
     B0_dir : sequence of float
@@ -678,7 +705,11 @@ def build_invivo_phantom(chi: np.ndarray, magnitude: np.ndarray, TEs: Sequence[f
     if mag.shape[:3] != chi.shape:
         raise ValueError(f"magnitude {mag.shape[:3]} and chi {chi.shape} grids differ")
     brain = np.asarray(brain_mask, bool)
-    support = (np.isfinite(chi) & (chi != 0)) if chi_support is None else np.asarray(chi_support, bool)
+    if chi_support is None:
+        # holes too: quantised maps (int16 x slope) have exact zeros inside the brain
+        support = ndi.binary_fill_holes(_largest_cc(np.isfinite(chi) & (chi != 0)))
+    else:
+        support = np.asarray(chi_support, bool)
     target = brain | support
 
     chi_clean, clean_info = clean_chi(chi, support, target, vox, B0_dir=B0_dir, **(clean or {}))

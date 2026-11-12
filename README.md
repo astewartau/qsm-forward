@@ -278,6 +278,52 @@ Asking for 3 mm slices across a 64 mm field of view gives 21 slices of 3.048 mm.
 the NIfTI affine report what was actually sampled, not what was asked for, so the signal and the
 ground-truth maps always describe the same grid.
 
+## Example building phantoms from in vivo data, with strong sources and pathology
+
+`qsm_forward.phantoms` turns an in vivo χ map and the multi-echo magnitude it came from into a head
+phantom with an exact truth, so each subject and scanner gives a new anatomy, and inserts strong
+sources with known position, size and strength. The module docstring describes each step.
+
+- **χ truth**: the in vivo map inside the brain, cleaned by `clean_chi`: outliers at the mask rim
+  (and isolated ones inside) replaced, the rim that V-SHARP eroded filled with mirrored texture,
+  streak power on the magic cone clamped to the off-cone level, and the white-noise floor removed
+  by a Wiener filter fitted to the map's own power-law spectrum. Whatever noise and streaking
+  survive become "anatomy"; more cleaning makes the truth too smooth. `clean_chi` reports what it
+  removed.
+- **Outside the brain**: a head model from the first-echo magnitude (soft tissue, bone, air
+  cavities, outside air) with the χ values of the 2019 head phantom (air +9.2, bone -2.1, soft
+  tissue 0 ppm), so background fields come from real head geometry. M0 and R2* are fitted from
+  the echoes. The phantom is extended inferiorly (`neck_mm`) so the FFT forward model sees neck,
+  not air, below the field of view; `simulate` crops the outputs back.
+- **Strong sources**: `insert_sources(phantom, specs or preset, seed)` adds calcifications,
+  haemorrhages, microbleeds, MS-like lesions with paramagnetic rims and central veins, and enlarged
+  veins, with matching M0 and R2* (signal voids), an instance label map and a source table. The
+  `streak-heavy` preset puts many strong sources of both signs in one brain. Calcifications carry
+  seg label 16, which QSM-CI's calcification metrics read.
+- **Streak labels**: `cone_restricted_error(recon, truth, mask, voxel_size, B0_dir)` is the
+  reconstruction error restricted to the magic-angle cone in k-space.
+- **Simulation**: `simulate(phantom, recon_params, bids_dir)` calls `generate_bids` with the true
+  total field (`*_fieldmap.nii`), true local field (`*_fieldmap-local.nii`) and shimmed total field
+  saved, and writes the source labels (`*_desc-sources_dseg.nii`) and the source table
+  (`*_phantom.json`).
+
+```python
+import nibabel as nib, numpy as np
+from qsm_forward import ReconParams, phantoms
+
+chi = nib.load("chi.nii.gz")                      # in vivo χ (ppm), e.g. iLSQR with a BET mask
+mag = nib.load("magnitude.nii.gz").get_fdata()    # echoes last
+brain = nib.load("mask.nii.gz").get_fdata() > 0
+ph = phantoms.build_invivo_phantom(chi.get_fdata(), mag, TEs, chi.header.get_zooms()[:3], brain,
+                                   affine=chi.affine, TR=0.035, flip_angle=15)
+ph = phantoms.insert_sources(ph, "streak-heavy", seed=1)
+ph.save("phantom")
+phantoms.simulate(ph, ReconParams(TEs=np.array(TEs), B0=3, peak_snr=100, random_seed=1), "bids")
+```
+
+[`examples/invivo_phantoms.py`](qsm_forward/examples/invivo_phantoms.py) does the same from the
+command line for a QSM-CI harmonization acquisition.
+
 ## Example simulating chi-separation (paramagnetic/diamagnetic) sources
 
 The optional chi-separation model splits total susceptibility into paramagnetic (χ⁺, e.g. iron) and diamagnetic (χ⁻, e.g. myelin/calcium) components and derives the associated relaxation maps. When you don't supply explicit χ⁺/χ⁻ maps, they are derived from the phantom's tissue segmentation using per-tissue reference values (see the attribution note above). Passing `chisep_signal=True` additionally switches the MEGRE magnitude to the chi-sep-aware signal model (R2 + Dr·|χ|) instead of R2*.

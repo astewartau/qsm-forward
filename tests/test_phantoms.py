@@ -103,6 +103,15 @@ def test_clean_chi_removes_cone_excess_and_spikes():
     _, info2 = phantoms.clean_chi(out, mask, mask, vox, denoise=None, despike_sd=None)
     assert info["cone_excess_db_median_after"] < 1.5
     assert info2["cone_excess_db_median"] < 1.5
+    # a cone deficit is left alone by "clamp" and filled by "equalise"
+    hole = np.real(np.fft.ifftn(np.where(dev < 6.0, 0.2, 1.0) * np.fft.fftn(np.where(mask, rng.normal(0, 0.02, shape), 0.0))))
+    hole = np.where(mask, hole, 0.0)
+    _, i_c = phantoms.clean_chi(hole, mask, mask, vox, denoise=None, despike_sd=None)
+    _, i_e = phantoms.clean_chi(hole, mask, mask, vox, denoise=None, despike_sd=None, cone="equalise")
+    assert i_c["cone_excess_db_median"] < -3 and i_c["cone_excess_db_median_after"] < -3
+    assert i_e["cone_excess_db_median_after"] > i_c["cone_excess_db_median_after"] + 2
+    with pytest.raises(ValueError):
+        phantoms.clean_chi(chi, mask, mask, vox, cone="fill")
     _, info3 = phantoms.clean_chi(chi, mask, mask, vox, denoise="wiener")
     assert "spectral_exponent" in info3
     out_tv, _ = phantoms.clean_chi(chi, mask, mask, vox, denoise="tv", tv_weight=0.01)
