@@ -356,3 +356,18 @@ def test_inject_bids_and_cli(tmp_path):
     assert d2["Effects"][1]["params"]["shift_mm"] == [2, 0, 0]
     with pytest.raises(SystemExit):
         A._parse_effect("nonsense")
+
+
+def test_swi_homodyne():
+    sig, m, _ = _signal()
+    x = np.indices((N, N, N))[0]
+    smooth = np.where(m, 1.0, 0.0)[..., None] * np.exp(1j * 0.1 * x)[..., None] * np.ones(4)
+    r = A.swi_homodyne(smooth, VOX, window=8)
+    inner = _sphere(5.0)
+    assert np.abs(np.angle(r.data[..., 0][inner])).max() < 0.1
+    np.testing.assert_allclose(np.abs(r.data), np.abs(smooth))
+    assert r.label["severity"]["value"] == pytest.approx(4 / N)
+    # slice-wise (2D): a phase constant within each slice is removed whatever it does across slices
+    z = np.indices((N, N, N))[2]
+    sl = np.exp(1j * 0.3 * z)
+    np.testing.assert_allclose(A.swi_homodyne(sl, VOX, window=8).data, np.ones(sl.shape), atol=1e-9)

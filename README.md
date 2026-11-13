@@ -365,7 +365,8 @@ Each level is written as `*_desc-degraded<L>_{fieldmap-local,Chimap,Chimap-echoe
 | `bipolar_readout` (`gradient_rad_per_mm`, `offset_rad`, `shift_voxels`, `readout_axis`) | complex echoes (even echoes) | odd–even phase gradient, rad/mm | BKG |
 | `kspace_spike` (`amplitude`, `position`, `echoes`) | complex echoes | spike / \|S(k=0)\|; stripe wavelength | NOISE |
 | `partial_fourier` (`axis`, `fraction`, `method` zerofill/homodyne) | complex echoes | missing k-space fraction | RES |
-| `phase_highpass` (`sigma_mm`) | complex echoes (SWI-style homodyne filter) | cut-off, cycles/mm | CALIB |
+| `phase_highpass` (`sigma_mm`) | complex echoes (3D Gaussian homodyne high-pass) | cut-off, cycles/mm | CALIB |
+| `swi_homodyne` (`window`, `slice_axis`, `taper`) | complex echoes (scanner SWI filter: 2D slice-wise homodyne, central `window` × `window` k-space lines, Hann) | cut-off, cycles/mm | CALIB |
 
 `chi_under_mask` shows a faulty mask on a χ map. It fills the voxels the mask wrongly takes in with a stand-in for outside-brain junk: smooth plus noisy, scaled by 1/magnitude. A real pipeline run on the complex data with the faulty mask gives the real junk. The head phantom has scalp and skull signal and whole-head χ, so its field outside the brain is real; the `simple` and `chi-sep` phantoms (brain-masked χ) have none.
 

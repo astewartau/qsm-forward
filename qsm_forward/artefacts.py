@@ -33,7 +33,7 @@ Groups:
    (2D per-slice shifts), :func:`within_echo_motion` (k-space line mixing).
 5. Bipolar readout (BKG): :func:`bipolar_readout`.
 6. k-space effects: :func:`kspace_spike` (NOISE), :func:`partial_fourier` (RES),
-   :func:`phase_highpass` (CALIB).
+   :func:`phase_highpass` and :func:`swi_homodyne` (scanner-style 2D homodyne) (CALIB).
 
 Known limits of the forward model, stated in each function: when the head moves, the field moves
 with it rigidly (the change of the dipole field with the head's orientation relative to B0, and the
@@ -1000,6 +1000,46 @@ def phase_highpass(signal, voxel, sigma_mm=20.0):
                                {"sigma_mm": sigma_mm}))
 
 
+def swi_homodyne(signal, voxel, window=64, slice_axis=2, taper="hann"):
+    """Scanner SWI phase filter (taxonomy H10): slice by slice (2D, the in-plane axes other than
+    ``slice_axis``), a homodyne high-pass S · conj(L)/|L|, where L is S low-passed by keeping a
+    ``window`` × ``window`` block of central k-space lines (an int, or one size per in-plane axis;
+    clamped to the matrix) under a ``taper`` ('hann' or 'box'). Scanners use 64 × 64 or 96 × 96 at the
+    acquisition matrix, so the cut-off scales with the field of view, not the voxel size. Severity:
+    the window's half-width in cycles/mm (geometric mean over the in-plane axes), the spatial
+    frequency where the low-pass ends; larger windows remove more."""
+    voxel = _voxel(voxel)
+    s = np.asarray(signal, complex)
+    multi = s.ndim == 4
+    s4 = s if multi else s[..., None]
+    inplane = [i for i in range(3) if i != slice_axis]
+    w = [window, window] if np.isscalar(window) else list(window)
+    shp = [s4.shape[i] for i in inplane]
+    w = [int(min(wi, n)) for wi, n in zip(w, shp)]
+
+    def win1(n, wi):
+        k = np.fft.fftfreq(n) * n  # signed line index
+        if taper == "box":
+            return (np.abs(k) < wi / 2).astype(float)
+        if taper == "hann":
+            return np.where(np.abs(k) < wi / 2, 0.5 * (1 + np.cos(2 * np.pi * k / wi)), 0.0)
+        raise ValueError("taper must be 'hann' or 'box'")
+
+    H = win1(shp[0], w[0])[:, None] * win1(shp[1], w[1])[None, :]
+    bshape = [1, 1, 1]
+    bshape[inplane[0]], bshape[inplane[1]] = shp
+    H3 = H.reshape(bshape)
+    out = np.empty_like(s4)
+    for e in range(s4.shape[-1]):
+        L = np.fft.ifftn(np.fft.fftn(s4[..., e], axes=inplane) * H3, axes=inplane)
+        out[..., e] = s4[..., e] * np.exp(-1j * np.angle(L))
+    kc = [wi / 2 / (n * voxel[ax]) for wi, n, ax in zip(w, shp, inplane)]
+    return EffectResult(out if multi else out[..., 0],
+                        _label("swi_homodyne", ["H10"], "CALIB", "high-pass cut-off", float(np.sqrt(kc[0] * kc[1])),
+                               "cycles/mm", {"window": w, "slice_axis": slice_axis, "taper": taper},
+                               matrix=shp, cutoff_cycles_per_mm=kc))
+
+
 # ---------------------------------------------------------------- registry
 
 @dataclass(frozen=True)
@@ -1077,6 +1117,8 @@ EFFECTS = {
                               ({"fraction": 0.875}, {"fraction": 0.75}, {"fraction": 0.625, "method": "homodyne"})),
     "phase_highpass": Effect(phase_highpass, "signal", ("H10",), "CALIB",
                              ({"sigma_mm": 60.0}, {"sigma_mm": 20.0}, {"sigma_mm": 6.0})),
+    "swi_homodyne": Effect(swi_homodyne, "signal", ("H10",), "CALIB",
+                           ({"window": 8}, {"window": 16}, {"window": 32})),
 }
 
 
