@@ -9,7 +9,7 @@ to simulate oblique acquisition.
 
 The simulation results are saved in the "bids" directory.
 
-Author: Ashley Stewart (a.stewart.au@gmail.com)
+Author: Ashley Stewart
 """
 
 import qsm_forward

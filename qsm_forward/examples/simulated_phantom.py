@@ -10,7 +10,7 @@ function of the qsm_forward library.
 
 The simulation results are saved in the "bids" directory.
 
-Author: Ashley Stewart (a.stewart.au@gmail.com)
+Author: Ashley Stewart
 """
 
 

@@ -32,7 +32,7 @@ Checking `import qsm_forward` from inside the repository directory proves nothin
 since the current directory supplies the package there and will not once you cd
 elsewhere to generate into an output directory.
 
-Author: Ashley Stewart (a.stewart.au@gmail.com)
+Author: Ashley Stewart
 """
 
 import numpy as np
