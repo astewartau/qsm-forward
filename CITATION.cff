@@ -9,7 +9,6 @@ type: software
 authors:
   - given-names: Ashley
     family-names: Stewart
-    email: a.stewart.au@gmail.com
 repository-code: "https://github.com/astewartau/qsm-forward"
 url: "https://github.com/astewartau/qsm-forward"
 license: MIT

@@ -1,5 +1,5 @@
 """
-Author: Ashley Stewart <a.stewart.au@gmail.com>
+Author: Ashley Stewart
 
 Please cite the following work, which provided the original MATLAB implementation
 of the base head phantom (total susceptibility, field/signal/relaxation models):

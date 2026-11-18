@@ -9,7 +9,6 @@ setup(
     package_data={ 'qsm_forward': ['label.json'] },
     url='https://github.com/astewartau/qsm-forward',
     author='Ashley Stewart',
-    author_email='a.stewart.au@gmail.com',
     description='A forward-model simulation for Quantitative Susceptibility Mapping',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',

@@ -10,7 +10,7 @@ The simulations are carried out with various reconstruction parameters
 The tissue parameters are loaded from the directory "../data". The data directory can
 be downloaded from https://doi.org/10.34973/m20r-jt17.
 
-Author: Ashley Stewart (a.stewart.au@gmail.com)
+Author: Ashley Stewart
 """
 
 import qsm_forward
