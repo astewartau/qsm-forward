@@ -512,7 +512,7 @@ def adjust_affine_for_B0_direction(affine, B0_dir):
     rotation_matrix = np.linalg.inv(rotation_matrix_from_vectors([0, 0, 1], B0_dir_normalized))
     return affine.dot(np.vstack([np.column_stack([rotation_matrix, [0, 0, 0]]), [0, 0, 0, 1]]))
 
-def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, chisep_signal=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
+def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_dir, save_chi=True, save_mask=True, save_segmentation=True, save_field=False, save_shimmed_field=False, save_shimmed_offset_field=False, save_chi_pos=False, save_chi_neg=False, save_r2prime=False, dr=DR_KERNEL, dr_neg=None, chisep_signal=False, chisep_multicompartment=False, anisotropy=False, save_r2=False, save_dr_pos=False, save_dr_neg=False, save_t2=False, save_se=False):
     """
     Simulate T2*-weighted magnitude and phase images and save the outputs in the BIDS-compliant format.
 
@@ -644,6 +644,10 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
         phase_offset = recon_params.phase_offset + generate_phase_offset(tissue_params.M0.get_fdata(), tissue_params.mask.get_fdata(), tissue_params.M0.get_fdata().shape)
         if save_shimmed_offset_field: nib.save(resize(nib.Nifti1Image(dataobj=np.array(field, dtype=np.float32), affine=tissue_params.nii_affine, header=tissue_params.nii_header), recon_params.voxel_size), filename=os.path.join(subject_dir_deriv, "anat", f"{recon_name}_desc-shimmed-offset_fieldmap.nii"))
 
+    # The multi-compartment GRE model needs the chi-sep maps (chi+/chi-, R2, Dr), so it implies chisep_signal.
+    if chisep_multicompartment:
+        chisep_signal = True
+
     # transverse relaxation (R2) — shared by the chi-sep GRE model and the SE signal
     R2_data = None
     dr_pos_data = None
@@ -725,6 +729,7 @@ def generate_bids(tissue_params: TissueParams, recon_params: ReconParams, bids_d
             dr_neg=dr_neg_data,
             chi_pos=chi_pos_data,
             chi_neg=chi_neg_data,
+            multicompartment=chisep_multicompartment,
         )
     
         # k-space cropping of sigHR
@@ -1453,7 +1458,7 @@ def generate_shimmed_field(field, mask, order=2):
     return FIT3D, Residuals, b
 
 def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, R1=1, R2star=50, M0=1,
-                    R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None):
+                    R2=None, dr_pos=None, dr_neg=None, chi_pos=None, chi_neg=None, multicompartment=False):
     """
     Compute the MRI signal based on the given parameters.
 
@@ -1501,7 +1506,26 @@ def generate_signal(field, B0=3, TR=1, TE=30e-3, flip_angle=90, phase_offset=0, 
     """
 
     # Choose decay model
-    if R2 is not None and dr_pos is not None and dr_neg is not None and chi_pos is not None and chi_neg is not None:
+    chisep = R2 is not None and dr_pos is not None and dr_neg is not None and chi_pos is not None and chi_neg is not None
+    if chisep and multicompartment:
+        # Multi-compartment (signal-domain) chi-sep model: the voxel magnitude is |Σ compartments|,
+        # each a static-dephasing exponential with its OWN decay rate (R2 + Dr·|chi|) and sphere
+        # frequency ((2/3)·chi·γ·B0). Paramagnetic and diamagnetic compartments beat against each
+        # other, giving the non-mono-exponential magnitude that signal-domain separators (DECOMPOSE)
+        # need. The decay rates use the SAME Dr kernel as generate_r2prime, so the effective R2* (and
+        # thus R2') is unchanged for the R2'-domain methods — only the *shape* of the decay is enriched.
+        # Volume fractions split the susceptibility signal by relative source content (so a pure-para
+        # voxel has no diamagnetic compartment), leaving a neutral (non-source) fraction.
+        w = 2 * np.pi * (2.0 / 3.0) * 42.58 * B0  # (2/3)·γ·B0 phase coeff (per ppm, per s), matching the bulk-phase 42.58
+        tot = np.abs(chi_pos) + np.abs(chi_neg) + 1e-6
+        C_pos = 0.5 * np.abs(chi_pos) / tot
+        C_neg = 0.5 * np.abs(chi_neg) / tot
+        C_0 = 1.0 - C_pos - C_neg
+        S = (C_pos * np.exp(-(R2 + dr_pos * np.abs(chi_pos) + 1j * w * chi_pos) * TE)
+             + C_neg * np.exp(-(R2 + dr_neg * np.abs(chi_neg) + 1j * w * chi_neg) * TE)
+             + C_0 * np.exp(-R2 * TE))
+        decay = np.abs(S)  # multi-compartment magnitude envelope; the bulk field carries the phase below
+    elif chisep:
         # Chi-sep-aware signal model: S ~ exp(-TE * (R2 + Dr_pos*|chi+| + Dr_neg*|chi-|))
         decay = np.exp(-TE * (R2 + dr_pos * np.abs(chi_pos) + dr_neg * np.abs(chi_neg)))
     else:
