@@ -1,18 +1,19 @@
 #!/bin/bash
+# Iron calibration sweep: one task per (population mix, seed). Mix list in $MESO_CALIB_LIST
+# (one --pops spec per line); $MESO_NSEED seeds each (default 3).
 #SBATCH --job-name=meso-calib
 #SBATCH --account=a_ai_collab
 #SBATCH --partition=general
-#SBATCH --qos=normal
-#SBATCH --array=0-29
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
+#SBATCH --mem=12G
 #SBATCH --time=02:00:00
 #SBATCH --output=/scratch/user/uqaste15/chisep-meso/slurm_logs/calib_%A_%a.log
 set -euo pipefail
-PY=/home/uqaste15/miniconda3/envs/qsmxt/bin/python3
+PY=${MESO_PY:-/scratch/user/uqaste15/envs/meso/bin/python}
 HERE=${MESO_DIR:-/scratch/user/uqaste15/src/qsmf-wt-meso/prototypes/mesoscopic}
+OUT=${MESO_OUT:-/scratch/user/uqaste15/chisep-meso/calib_v2}
 export OMP_NUM_THREADS=1
-RS=(0.5 1 2.5 5 10); XS=(1 3 10); BS=(3 7)
+mapfile -t MIX < "$MESO_CALIB_LIST"
 i=$SLURM_ARRAY_TASK_ID
-R=${RS[$((i % 5))]}; X=${XS[$(((i / 5) % 3))]}; B=${BS[$((i / 15))]}
-$PY $HERE/calibrate_iron.py --radius $R --dchi $X --B0 $B --out /scratch/user/uqaste15/chisep-meso/calib
+NS=${MESO_NSEED:-3}
+$PY $HERE/calibrate_iron.py --pops "${MIX[$((i / NS))]}" --seed $((i % NS)) --walkers ${MESO_WALKERS:-6000} --chi ${MESO_CHI:-0.1} --out $OUT

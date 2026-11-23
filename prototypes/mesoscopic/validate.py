@@ -7,6 +7,9 @@
    short-time -ln|S| = zeta (dw_c t)^2 / 4.
 3. Isolated hollow cylinder (Wharton & Bowtell 2012): compartment mean frequency
    differences myelin-extra and axon-extra vs the closed forms in qsm_forward.
+4. Monte-Carlo diffusion, motional-narrowing limit (alpha = dw R^2/D << 1): permeable
+   spheres give R2*(GRE) = R2(Hahn SE) = (16/45) zeta dw^2 R^2/D (meso.mn_r2_sphere),
+   checked at two time steps (the LUT's 2 us and 1 us).
 
 Usage:  python validate.py [--out DIR] [--quick]
 Writes validation.json (+ printed table) into DIR.
@@ -162,6 +165,32 @@ def check_hollow(n=4096, r_out=0.08, g=0.7, chi_i=-0.1, chi_a=-0.1, B0=7.0,
     return res
 
 
+def check_narrowing(radius=0.5, dchi=2.0, zeta=0.1, B0=3.0, D=1.0, dts=(2e-3, 1e-3),
+                    walkers=20000, tmax=200.0, seed=0):
+    rng = np.random.default_rng(seed)
+    spec = [dict(name="fe", radius=radius, L=24 * radius, n=128, zetas=[zeta])]
+    vox = meso.build_voxel(4.0, 0.0, spec, n2d=16, rng=rng)
+    z = float(vox.pops[0].zeta[0])
+    pos, comp, _ = meso.init_walkers(vox, walkers, rng)
+    TE = np.arange(0, tmax + 1e-9, 5.0)
+    kt = np.arange(0, len(TE), 2)
+    kh = kt // 2
+    coef = meso.phase_coeffs(vox, 0.0, 0.0, {"fe": (0, dchi)})
+    th = meso.mn_r2_sphere(z, dchi, B0, radius, D) * 1e3
+    out = []
+    for dt in dts:
+        I = meso.walk(vox, pos, comp, TE, D=D, dt=dt, rng=np.random.default_rng(seed + 1))
+        g, s_ = meso.compartment_signals(I, comp, coef, B0, (kt, kh))
+        m = TE >= 50
+        ms = TE[kt] >= 50
+        r2s = float(meso.fit_rate(TE[m], g["extra"][m]))
+        r2 = float(meso.fit_rate(TE[kt][ms], s_["extra"][ms]))
+        out.append(dict(dt_ms=dt, zeta=z, alpha=meso.dw_sphere(dchi, B0) * radius ** 2 / D,
+                        R2star_sim_per_s=r2s, R2_SE_sim_per_s=r2, R2_MN_theory_per_s=th,
+                        rel_err_R2star=r2s / th - 1, rel_err_R2_SE=r2 / th - 1))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/scratch/user/uqaste15/chisep-meso/validation")
@@ -174,12 +203,16 @@ def main():
         res["spheres"] = check_spheres(n=128, rad_px=3, seeds=(0,))
         res["cylinders"] = check_cylinders(n=1024, rad_px=4)
         res["hollow"] = check_hollow(n=1024, r_out=0.1)
+        res["narrowing"] = check_narrowing(walkers=2000, dts=(2e-3,), tmax=100.0)
     else:
         res["spheres"] = check_spheres()
         print("spheres", json.dumps(res["spheres"], indent=1), flush=True)
         res["cylinders"] = check_cylinders()
         print("cylinders", json.dumps(res["cylinders"], indent=1), flush=True)
         res["hollow"] = check_hollow()
+        print("hollow done", flush=True)
+        res["narrowing"] = check_narrowing()
+        print("narrowing", json.dumps(res["narrowing"], indent=1), flush=True)
     res["elapsed_s"] = time.time() - t0
     with open(os.path.join(a.out, "validation.json"), "w") as fh:
         json.dump(res, fh, indent=1)
