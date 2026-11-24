@@ -77,7 +77,7 @@ and `lorentz` (1/3 − kz²/k²). `SphereLUT.chi_echoes` returns the per-echo ap
 ## Usage
 
 ```bash
-PY=/scratch/user/uqaste15/envs/meso/bin/python   # numpy, scipy, nibabel, matplotlib
+PY=/scratch/user/uqaste15/projects/chisep/env/meso/bin/python   # uv env from envs/meso.lock.txt (see envs/README.md)
 $PY validate.py --out OUT/validation
 sbatch --export=ALL,MESO_DIR=$PWD,MESO_OUT=OUT/lut_parts lut_array.slurm
 $PY lut.py merge --parts OUT/lut_parts --mode diffusion --out OUT/lut_diffusion.npz

@@ -10,7 +10,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=/scratch/user/uqaste15/chisep-meso/slurm_logs/lut_%A_%a.log
 set -euo pipefail
-PY=${MESO_PY:-/scratch/user/uqaste15/envs/meso/bin/python}
+PY=${MESO_PY:-/scratch/user/uqaste15/projects/chisep/env/meso/bin/python}
 HERE=${MESO_DIR:-/scratch/user/uqaste15/src/qsmf-wt-meso/prototypes/mesoscopic}
 OUT=${MESO_OUT:-/scratch/user/uqaste15/chisep-meso/lut_parts}
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
